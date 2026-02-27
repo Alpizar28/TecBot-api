@@ -13,6 +13,7 @@ COPY apps/scraper/ ./apps/scraper/
 
 # Install deps
 RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @tec-brain/types build
 
 ENV NODE_ENV=production
 
