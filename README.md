@@ -67,6 +67,11 @@ Variables clave:
 - `CRON_SCHEDULE`
 - `CORE_CONCURRENCY`
 - `SCRAPER_URL`
+- `HTTP_RETRY_ATTEMPTS`
+- `HTTP_RETRY_BASE_MS`
+- `ALERT_PARTIAL_THRESHOLD_PCT`
+- `ALERT_USER_FAILURES_THRESHOLD`
+- `ADMIN_ALERT_CHAT_ID` (opcional, alertas Telegram de operación)
 - `SESSION_DIR`
 
 Generar `DB_ENCRYPTION_KEY`:
@@ -174,6 +179,11 @@ Si borras archivos en Drive y quieres reprocesar documentos viejos, también deb
 docker logs -f tec-brain-core
 docker logs -f tec-brain-scraper
 ```
+
+El core también registra:
+- métricas por endpoint (`Endpoint metrics`)
+- métricas por ciclo (`Cycle metrics`)
+- alertas automáticas cuando se superan umbrales (`Automatic cycle alerts triggered`)
 
 ## Scripts útiles
 

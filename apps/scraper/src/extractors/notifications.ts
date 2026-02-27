@@ -18,14 +18,41 @@ interface InternalDispatchResponse {
 }
 
 const extractorLogger = logger.child({ component: 'notifications_extractor' });
+const HTTP_RETRY_ATTEMPTS = parseInt(process.env.HTTP_RETRY_ATTEMPTS ?? '3', 10);
+const HTTP_RETRY_BASE_MS = parseInt(process.env.HTTP_RETRY_BASE_MS ?? '400', 10);
+
+interface EndpointMetric {
+    calls: number;
+    ok: number;
+    failed: number;
+    retries: number;
+    totalMs: number;
+}
+
+type MetricStore = Record<string, EndpointMetric>;
 
 export async function extractNotifications(client: TecHttpClient): Promise<RawNotification[]> {
     const notifications: RawNotification[] = [];
+    const metrics: MetricStore = {};
 
     try {
         extractorLogger.debug('Fetching unread notifications via API');
-        await client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/has_unread_notifications?');
-        const notifRes = await client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/get_user_notifications?');
+        await requestWithRetry(
+            () => client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/has_unread_notifications?'),
+            {
+                endpoint: 'tec.has_unread_notifications',
+                metrics,
+                logger: extractorLogger,
+            },
+        );
+        const notifRes = await requestWithRetry(
+            () => client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/get_user_notifications?'),
+            {
+                endpoint: 'tec.get_user_notifications',
+                metrics,
+                logger: extractorLogger,
+            },
+        );
 
         if (notifRes.status !== 200 || !Array.isArray(notifRes.data?.notifications)) {
             extractorLogger.warn({ status: notifRes.status }, 'Notification API response is not valid');
@@ -38,6 +65,8 @@ export async function extractNotifications(client: TecHttpClient): Promise<RawNo
         }
     } catch (error) {
         extractorLogger.error({ error }, 'Failed to fetch notifications');
+    } finally {
+        logMetrics('extractNotifications', metrics);
     }
 
     return notifications;
@@ -50,10 +79,25 @@ export async function processNotificationsSequentially(
     cookies: { name: string; value: string; domain?: string; path?: string }[],
     keywords: string[] = [],
 ): Promise<void> {
+    const metrics: MetricStore = {};
     try {
         extractorLogger.info({ userId }, 'Starting sequential notification processing');
-        await client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/has_unread_notifications?');
-        const notifRes = await client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/get_user_notifications?');
+        await requestWithRetry(
+            () => client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/has_unread_notifications?'),
+            {
+                endpoint: 'tec.has_unread_notifications',
+                metrics,
+                logger: extractorLogger,
+            },
+        );
+        const notifRes = await requestWithRetry(
+            () => client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/get_user_notifications?'),
+            {
+                endpoint: 'tec.get_user_notifications',
+                metrics,
+                logger: extractorLogger,
+            },
+        );
 
         if (notifRes.status !== 200 || !Array.isArray(notifRes.data?.notifications)) {
             extractorLogger.warn({ userId, status: notifRes.status }, 'Could not retrieve notifications via API');
@@ -80,14 +124,21 @@ export async function processNotificationsSequentially(
                     continue;
                 }
 
-                const response = await axios.post<InternalDispatchResponse>(
-                    dispatchUrl,
+                const response = await requestWithRetry(
+                    () => axios.post<InternalDispatchResponse>(
+                        dispatchUrl,
+                        {
+                            userId,
+                            notification: parsed,
+                            cookies,
+                        },
+                        { timeout: 120_000 },
+                    ),
                     {
-                        userId,
-                        notification: parsed,
-                        cookies,
+                        endpoint: 'core.internal_dispatch',
+                        metrics,
+                        logger: extractorLogger,
                     },
-                    { timeout: 120_000 },
                 );
 
                 const shouldDelete = shouldDeleteFromTec(response.status, response.data);
@@ -109,7 +160,14 @@ export async function processNotificationsSequentially(
 
                 const delUrl =
                     `https://tecdigital.tec.ac.cr/tda-notifications/ajax/notification_delete?notification_id=${item.id}`;
-                const delRes = await client.client.get(delUrl);
+                const delRes = await requestWithRetry(
+                    () => client.client.get(delUrl),
+                    {
+                        endpoint: 'tec.notification_delete',
+                        metrics,
+                        logger: extractorLogger,
+                    },
+                );
 
                 if (delRes.status === 200) {
                     extractorLogger.info({ userId, notificationId: item.id, externalId: parsed.external_id }, 'Notification deleted in TEC');
@@ -126,6 +184,8 @@ export async function processNotificationsSequentially(
         }
     } catch (error) {
         extractorLogger.error({ userId, error }, 'Sequential processor failed');
+    } finally {
+        logMetrics('processNotificationsSequentially', metrics, { userId });
     }
 }
 
@@ -239,6 +299,90 @@ async function resolveDocumentFiles(
         extractorLogger.error({ source: docLink, error }, 'Error resolving document files');
         return [];
     }
+}
+
+interface RetryContext {
+    endpoint: string;
+    metrics: MetricStore;
+    logger: typeof extractorLogger;
+}
+
+async function requestWithRetry<T>(
+    request: () => Promise<T>,
+    context: RetryContext,
+): Promise<T> {
+    const maxAttempts = Math.max(1, HTTP_RETRY_ATTEMPTS);
+    const metric = getMetric(context.metrics, context.endpoint);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const startedAt = Date.now();
+        try {
+            const result = await request();
+            metric.calls += 1;
+            metric.ok += 1;
+            metric.totalMs += Date.now() - startedAt;
+            if (attempt > 1) metric.retries += attempt - 1;
+            return result;
+        } catch (error) {
+            metric.calls += 1;
+            metric.failed += 1;
+            metric.totalMs += Date.now() - startedAt;
+
+            const retryable = isRetryableHttpError(error);
+            if (!retryable || attempt === maxAttempts) {
+                throw error;
+            }
+
+            const sleepMs = backoffWithJitter(attempt, HTTP_RETRY_BASE_MS);
+            context.logger.warn({
+                endpoint: context.endpoint,
+                attempt,
+                maxAttempts,
+                sleepMs,
+            }, 'Retrying request after retryable error');
+            await sleep(sleepMs);
+        }
+    }
+
+    throw new Error(`Retry loop exhausted for ${context.endpoint}`);
+}
+
+function isRetryableHttpError(error: unknown): boolean {
+    if (!axios.isAxiosError(error)) return true;
+    const status = error.response?.status;
+    if (!status) return true;
+    return status >= 500 || status === 408 || status === 429;
+}
+
+function backoffWithJitter(attempt: number, baseMs: number): number {
+    const cappedAttempt = Math.min(attempt, 6);
+    const exp = baseMs * (2 ** (cappedAttempt - 1));
+    const jitter = Math.floor(Math.random() * baseMs);
+    return exp + jitter;
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getMetric(metrics: MetricStore, endpoint: string): EndpointMetric {
+    if (!metrics[endpoint]) {
+        metrics[endpoint] = { calls: 0, ok: 0, failed: 0, retries: 0, totalMs: 0 };
+    }
+    return metrics[endpoint];
+}
+
+function logMetrics(flow: string, metrics: MetricStore, extra?: Record<string, unknown>): void {
+    const serialized = Object.entries(metrics).map(([endpoint, metric]) => ({
+        endpoint,
+        ...metric,
+        avgMs: metric.calls > 0 ? Math.round(metric.totalMs / metric.calls) : 0,
+    }));
+    extractorLogger.info({
+        flow,
+        ...extra,
+        endpointMetrics: serialized,
+    }, 'HTTP endpoint metrics');
 }
 
 export function shouldDeleteFromTec(

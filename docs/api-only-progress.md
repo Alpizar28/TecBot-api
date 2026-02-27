@@ -3,6 +3,11 @@
 Fecha: 2026-02-27
 Estado: Completado en codigo/documentacion operativa dentro del repositorio.
 
+## Mejoras posteriores (2026-02-27)
+- Reintentos HTTP con backoff+jitter en scraper/core/drive.
+- Metricas por endpoint agregadas en logs estructurados.
+- Alertas automaticas de ciclo por umbral (opcionalmente enviadas a Telegram admin).
+
 ## Evidencia resumida por paso
 1. Matriz de paridad creada: `docs/parity-matrix.md`.
 2. Dataset canonico creado: `apps/scraper/tests/fixtures/canonical-notifications.json`.

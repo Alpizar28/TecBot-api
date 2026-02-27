@@ -11,6 +11,9 @@ export interface UploadResult {
     fileName: string;
 }
 
+const HTTP_RETRY_ATTEMPTS = parseInt(process.env.HTTP_RETRY_ATTEMPTS ?? '3', 10);
+const HTTP_RETRY_BASE_MS = parseInt(process.env.HTTP_RETRY_BASE_MS ?? '400', 10);
+
 export class DriveService {
     private readonly drive: drive_v3.Drive;
 
@@ -103,29 +106,73 @@ export class DriveService {
     ): Promise<UploadResult> {
         const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
 
-        const fileRes = await axios.get<ArrayBuffer>(downloadUrl, {
-            responseType: 'arraybuffer',
-            headers: {
-                Cookie: cookieHeader,
-                'User-Agent':
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            },
-            timeout: 60_000,
-        });
+        const fileRes = await withRetry(
+            () => axios.get<ArrayBuffer>(downloadUrl, {
+                responseType: 'arraybuffer',
+                headers: {
+                    Cookie: cookieHeader,
+                    'User-Agent':
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                },
+                timeout: 60_000,
+            }),
+            'tec.file_download',
+        );
 
-        const stream = Readable.from(Buffer.from(fileRes.data));
+        const fileBuffer = Buffer.from(fileRes.data);
         const contentType =
             (fileRes.headers['content-type'] as string | undefined) ?? 'application/octet-stream';
 
-        const res = await this.drive.files.create({
-            requestBody: { name: fileName, parents: [parentFolderId] },
-            media: { mimeType: contentType, body: stream },
-            fields: 'id',
-        });
+        const res = await withRetry(
+            () => this.drive.files.create({
+                requestBody: { name: fileName, parents: [parentFolderId] },
+                media: { mimeType: contentType, body: Readable.from(fileBuffer) },
+                fields: 'id',
+            }),
+            'drive.file_upload',
+        );
 
         const fileId = res.data.id;
         if (!fileId) throw new Error(`Upload failed for file: ${fileName}`);
 
         return { fileId, fileName };
     }
+}
+
+async function withRetry<T>(request: () => Promise<T>, endpoint: string): Promise<T> {
+    const maxAttempts = Math.max(1, HTTP_RETRY_ATTEMPTS);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await request();
+        } catch (error) {
+            if (!isRetryableError(error) || attempt === maxAttempts) {
+                throw error;
+            }
+
+            const sleepMs = backoffWithJitter(attempt, HTTP_RETRY_BASE_MS);
+            logger.warn({ component: 'drive_service', endpoint, attempt, sleepMs }, 'Retrying failed request');
+            await sleep(sleepMs);
+        }
+    }
+
+    throw new Error(`Retry loop exhausted for ${endpoint}`);
+}
+
+function isRetryableError(error: unknown): boolean {
+    if (!axios.isAxiosError(error)) return true;
+    const status = error.response?.status;
+    if (!status) return true;
+    return status >= 500 || status === 408 || status === 429;
+}
+
+function backoffWithJitter(attempt: number, baseMs: number): number {
+    const cappedAttempt = Math.min(attempt, 6);
+    const exp = baseMs * (2 ** (cappedAttempt - 1));
+    const jitter = Math.floor(Math.random() * baseMs);
+    return exp + jitter;
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
