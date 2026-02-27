@@ -177,9 +177,10 @@ function isStoredCookie(value: unknown): value is StoredCookie {
 }
 
 function buildChildLogger(logger: LoggerLike, bindings: Record<string, unknown>): LoggerLike {
-    const maybeChild = (logger as { child?: (value: Record<string, unknown>) => LoggerLike }).child;
+    const loggerWithChild = logger as LoggerLike & { child?: (value: Record<string, unknown>) => LoggerLike };
+    const maybeChild = loggerWithChild.child;
     if (typeof maybeChild === 'function') {
-        return maybeChild(bindings);
+        return maybeChild.call(loggerWithChild, bindings);
     }
     return logger;
 }
