@@ -1,0 +1,28 @@
+{
+    "name": "tec-brain",
+    "private": true,
+    "version": "1.0.0",
+    "description": "Segundo Cerebro TEC — Professional Backend Monorepo",
+    "scripts": {
+        "build": "pnpm -r build",
+        "dev:scraper": "pnpm --filter @tec-brain/scraper dev",
+        "dev:core": "pnpm --filter @tec-brain/core dev",
+        "lint": "eslint 'apps/**/*.ts' 'packages/**/*.ts'",
+        "format": "prettier --write '**/*.{ts,json,yaml,md}'",
+        "test": "pnpm -r test",
+        "add-user": "tsx scripts/add-user.ts"
+    },
+    "devDependencies": {
+        "@typescript-eslint/eslint-plugin": "^7.0.0",
+        "@typescript-eslint/parser": "^7.0.0",
+        "eslint": "^8.57.0",
+        "prettier": "^3.2.5",
+        "tsx": "^4.11.0",
+        "typescript": "^5.4.5",
+        "vitest": "^1.5.0"
+    },
+    "engines": {
+        "node": ">=20.0.0",
+        "pnpm": ">=9.0.0"
+    }
+}

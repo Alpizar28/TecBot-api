@@ -1,0 +1,92 @@
+services:
+  # ─── Infrastructure ──────────────────────────────────────────────────────────
+
+  db:
+    image: postgres:15-alpine
+    container_name: tec-brain-db
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 250M
+        reservations:
+          memory: 100M
+    environment:
+      POSTGRES_USER: tecbrain
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: tecbrain
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U tecbrain" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Services ────────────────────────────────────────────────────────────────
+
+  scraper:
+    build:
+      context: .
+      dockerfile: apps/scraper/Dockerfile
+    container_name: tec-brain-scraper
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+        reservations:
+          memory: 100M
+    env_file: .env
+    environment:
+      PORT: "3001"
+    ports:
+      - "3001:3001"
+    volumes:
+      - sessions_data:/app/data/sessions
+    healthcheck:
+      test: [ "CMD-SHELL", "wget --quiet --tries=1 http://localhost:3001/health -O /dev/null || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  core:
+    build:
+      context: .
+      dockerfile: apps/core/Dockerfile
+    container_name: tec-brain-core
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 400M
+        reservations:
+          memory: 100M
+    env_file: .env
+    environment:
+      PORT: "3002"
+      SCRAPER_URL: "http://scraper:3001"
+      SCRAPER_MODE: "${SCRAPER_MODE:-api}"
+    ports:
+      - "3002:3002"
+    volumes:
+      - drive_creds:/app/data/credentials:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      scraper:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "wget --quiet --tries=1 http://localhost:3002/health -O /dev/null || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  postgres_data:
+  sessions_data:
+  drive_creds:

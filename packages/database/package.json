@@ -1,0 +1,26 @@
+{
+    "name": "@tec-brain/database",
+    "version": "1.0.0",
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "import": "./dist/index.js",
+            "types": "./dist/index.d.ts"
+        }
+    },
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsc --watch",
+        "migrate": "node --loader ts-node/esm src/migrate.ts"
+    },
+    "dependencies": {
+        "pg": "^8.11.5",
+        "@tec-brain/types": "workspace:*"
+    },
+    "devDependencies": {
+        "@types/pg": "^8.11.5",
+        "typescript": "^5.4.5"
+    }
+}

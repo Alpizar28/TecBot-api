@@ -1,0 +1,30 @@
+[
+  {
+    "id": "n1",
+    "type_hint": "news",
+    "text": "Curso: EL2207 | Se publico un aviso general",
+    "url": "/dotlrn/classes/EL2207/",
+    "date_text": "2026-02-27"
+  },
+  {
+    "id": "n2",
+    "type_hint": "task",
+    "text": "EL2207 - Se habilito examen parcial",
+    "url": "/dotlrn/classes/EL2207/evaluaciones",
+    "date_text": "2026-02-27"
+  },
+  {
+    "id": "n3",
+    "type_hint": "file",
+    "text": "Matematica Discreta - Nuevo documento adjunto",
+    "url": "/dotlrn/file-storage/#/229915573#/",
+    "date_text": "2026-02-27"
+  },
+  {
+    "id": "n4",
+    "type_hint": "file",
+    "text": "Fisica I - Material actualizado",
+    "url": "/dotlrn/classes/FI1101/materiales",
+    "date_text": "2026-02-27"
+  }
+]

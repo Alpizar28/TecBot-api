@@ -1,0 +1,400 @@
+import axios from 'axios';
+import type { RawNotification } from '@tec-brain/types';
+import { TecHttpClient } from '../clients/tec-http.client.js';
+import { logger } from '../logger.js';
+
+interface TecNotificationItem {
+    id?: string;
+    text?: string;
+    type_hint?: string;
+    url?: string;
+    date_text?: string;
+}
+
+interface InternalDispatchResponse {
+    status: 'success' | 'error';
+    processed?: boolean;
+    error?: string;
+}
+
+const extractorLogger = logger.child({ component: 'notifications_extractor' });
+
+export async function extractNotifications(client: TecHttpClient): Promise<RawNotification[]> {
+    const notifications: RawNotification[] = [];
+
+    try {
+        extractorLogger.debug('Fetching unread notifications via API');
+        await client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/has_unread_notifications?');
+        const notifRes = await client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/get_user_notifications?');
+
+        if (notifRes.status !== 200 || !Array.isArray(notifRes.data?.notifications)) {
+            extractorLogger.warn({ status: notifRes.status }, 'Notification API response is not valid');
+            return notifications;
+        }
+
+        for (const item of notifRes.data.notifications as TecNotificationItem[]) {
+            const parsed = await normalizeNotification(client, item);
+            notifications.push(parsed);
+        }
+    } catch (error) {
+        extractorLogger.error({ error }, 'Failed to fetch notifications');
+    }
+
+    return notifications;
+}
+
+export async function processNotificationsSequentially(
+    client: TecHttpClient,
+    userId: string,
+    dispatchUrl: string,
+    cookies: { name: string; value: string; domain?: string; path?: string }[],
+    keywords: string[] = [],
+): Promise<void> {
+    try {
+        extractorLogger.info({ userId }, 'Starting sequential notification processing');
+        await client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/has_unread_notifications?');
+        const notifRes = await client.client.get('https://tecdigital.tec.ac.cr/tda-notifications/ajax/get_user_notifications?');
+
+        if (notifRes.status !== 200 || !Array.isArray(notifRes.data?.notifications)) {
+            extractorLogger.warn({ userId, status: notifRes.status }, 'Could not retrieve notifications via API');
+            return;
+        }
+
+        const items = notifRes.data.notifications as TecNotificationItem[];
+        extractorLogger.info({ userId, total: items.length }, 'Notifications fetched for sequential processing');
+
+        for (const [index, item] of items.entries()) {
+            try {
+                const parsed = await normalizeNotification(client, item);
+
+                if (!parsed.link) {
+                    extractorLogger.debug({ userId, index }, 'Skipping notification without link');
+                    continue;
+                }
+
+                if (
+                    keywords.length > 0 &&
+                    !keywords.some((kw) => parsed.course.toLowerCase().includes(kw.toLowerCase()))
+                ) {
+                    extractorLogger.debug({ userId, index, course: parsed.course }, 'Notification filtered by keywords');
+                    continue;
+                }
+
+                const response = await axios.post<InternalDispatchResponse>(
+                    dispatchUrl,
+                    {
+                        userId,
+                        notification: parsed,
+                        cookies,
+                    },
+                    { timeout: 120_000 },
+                );
+
+                const shouldDelete = shouldDeleteFromTec(response.status, response.data);
+
+                if (!shouldDelete) {
+                    extractorLogger.warn({
+                        userId,
+                        externalId: parsed.external_id,
+                        status: response.status,
+                        dispatchResponse: response.data,
+                    }, 'Skipping TEC delete because Core did not fully process notification');
+                    continue;
+                }
+
+                if (!item.id) {
+                    extractorLogger.warn({ userId, externalId: parsed.external_id }, 'Missing TEC notification id');
+                    continue;
+                }
+
+                const delUrl =
+                    `https://tecdigital.tec.ac.cr/tda-notifications/ajax/notification_delete?notification_id=${item.id}`;
+                const delRes = await client.client.get(delUrl);
+
+                if (delRes.status === 200) {
+                    extractorLogger.info({ userId, notificationId: item.id, externalId: parsed.external_id }, 'Notification deleted in TEC');
+                } else {
+                    extractorLogger.warn({
+                        userId,
+                        notificationId: item.id,
+                        status: delRes.status,
+                    }, 'TEC delete endpoint returned non-200');
+                }
+            } catch (error) {
+                extractorLogger.error({ userId, index, error }, 'Error processing notification sequentially');
+            }
+        }
+    } catch (error) {
+        extractorLogger.error({ userId, error }, 'Sequential processor failed');
+    }
+}
+
+async function normalizeNotification(client: TecHttpClient, item: TecNotificationItem): Promise<RawNotification> {
+    const text = (item.text ?? '').trim();
+    const link = item.url ?? '';
+    const type = classifyType(item.type_hint ?? '', text, link);
+    const course = extractCourse(text);
+
+    let files: NonNullable<RawNotification['files']> | undefined;
+    let document_status: RawNotification['document_status'] | undefined;
+
+    if (type === 'documento' && link) {
+        const resolved = await resolveDocumentFiles(client, link);
+        files = resolved;
+        document_status = resolved.length > 0 ? 'resolved' : 'unresolved';
+    }
+
+    return {
+        external_id: `notif_${hashString(`${link}|${text.slice(0, 120)}`)}`,
+        type,
+        course,
+        title: text.split(' - ')[0] || text.slice(0, 120) || 'Notificación TEC',
+        description: text || 'Sin descripción',
+        link,
+        date: item.date_text || new Date().toISOString().slice(0, 10),
+        files,
+        document_status,
+    };
+}
+
+async function resolveDocumentFiles(
+    client: TecHttpClient,
+    docLink: string,
+): Promise<NonNullable<RawNotification['files']>> {
+    try {
+        const completeUrl = ensureAbsoluteUrl(docLink);
+        const files: NonNullable<RawNotification['files']> = [];
+        const dedupe = new Set<string>();
+        const folderId = extractFolderId(completeUrl);
+
+        if (folderId) {
+            extractorLogger.debug({ folderId }, 'Detected folder id, calling folder-chunk API');
+            const folderApiUrl = `https://tecdigital.tec.ac.cr/dotlrn/file-storage/view/folder-chunk?folder_id=${folderId}`;
+            const folderRes = await client.client.get(folderApiUrl, {
+                headers: { Accept: 'application/json, text/plain, */*' },
+            });
+
+            if (folderRes.status === 200 && Array.isArray(folderRes.data)) {
+                for (const fileItem of folderRes.data as Array<Record<string, unknown>>) {
+                    const kind = String(fileItem.type ?? '').toLowerCase();
+                    const fileId = fileItem.file_id;
+                    const objectId = fileItem.object_id;
+                    if (kind && kind !== 'file') continue;
+                    if (!fileId && !objectId) continue;
+
+                    const title = sanitizeFileName(
+                        String(fileItem.title ?? fileItem.name ?? `Documento-${fileId ?? objectId}`),
+                    );
+                    const downloadUrl =
+                        typeof fileItem.download_url === 'string' && fileItem.download_url
+                            ? ensureAbsoluteUrl(fileItem.download_url)
+                            : buildDownloadUrl(fileId, objectId, title);
+                    const mimeType = inferMimeType(title, downloadUrl, fileItem.mime_type);
+
+                    pushUniqueFile(files, dedupe, {
+                        file_name: title,
+                        download_url: downloadUrl,
+                        source_url: docLink,
+                        mime_type: mimeType,
+                    });
+                }
+            }
+        } else {
+            extractorLogger.debug({ url: completeUrl }, 'Falling back to HTML parsing for document files');
+            const res = await client.client.get<string>(completeUrl);
+            const html = String(res.data ?? '');
+
+            const downloadRegex = /\/dotlrn\/file-storage\/download\/[^\s"'<>]+/g;
+            const idRegex = /(?:file_id|object_id)=([0-9]+)/g;
+
+            for (const match of html.match(downloadRegex) ?? []) {
+                const normalized = ensureAbsoluteUrl(match);
+                const guessedName = guessFileNameFromUrl(normalized) ?? 'documento';
+                pushUniqueFile(files, dedupe, {
+                    file_name: sanitizeFileName(guessedName),
+                    download_url: normalized,
+                    source_url: docLink,
+                    mime_type: inferMimeType(guessedName, normalized),
+                });
+            }
+
+            let match: RegExpExecArray | null;
+            while ((match = idRegex.exec(html)) !== null) {
+                const id = match[1];
+                const field = match[0].startsWith('object_id=') ? 'object_id' : 'file_id';
+                const downloadUrl = `https://tecdigital.tec.ac.cr/dotlrn/file-storage/download/documento?${field}=${id}`;
+                const fileName = `Documento-${id}`;
+                pushUniqueFile(files, dedupe, {
+                    file_name: fileName,
+                    download_url: downloadUrl,
+                    source_url: docLink,
+                    mime_type: inferMimeType(fileName, downloadUrl),
+                });
+            }
+        }
+
+        extractorLogger.info({ source: docLink, count: files.length }, 'Resolved document files');
+        return files;
+    } catch (error) {
+        extractorLogger.error({ source: docLink, error }, 'Error resolving document files');
+        return [];
+    }
+}
+
+export function shouldDeleteFromTec(
+    httpStatus: number,
+    dispatchBody: InternalDispatchResponse | undefined,
+): boolean {
+    return (
+        httpStatus === 200 &&
+        dispatchBody?.status === 'success' &&
+        dispatchBody?.processed === true
+    );
+}
+
+export function classifyType(typeHint: string, text: string, link: string): RawNotification['type'] {
+    const source = `${typeHint} ${text} ${link}`.toLowerCase();
+    const documentSignals = [
+        'documento',
+        'archivo',
+        'adjunto',
+        'material',
+        'file-storage',
+        '.pdf',
+        '.doc',
+        '.ppt',
+        '.xls',
+    ];
+    if (documentSignals.some((signal) => source.includes(signal))) {
+        return 'documento';
+    }
+
+    const evaluationSignals = [
+        'evaluaci',
+        'tarea',
+        'examen',
+        'quiz',
+        'laboratorio',
+        'proyecto',
+        'parcial',
+    ];
+    if (evaluationSignals.some((signal) => source.includes(signal))) {
+        return 'evaluacion';
+    }
+
+    return 'noticia';
+}
+
+export function extractCourse(text: string): string {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (!normalized) return 'Curso Desconocido';
+
+    const labeled = normalized.match(/(?:curso|course)\s*:\s*([^|]{4,80})/i);
+    if (labeled?.[1]) return cleanCourseCandidate(labeled[1]);
+
+    const separators = [' - ', ' – ', ': ', ' | '];
+    for (const separator of separators) {
+        const idx = normalized.indexOf(separator);
+        if (idx > 0) {
+            const candidate = cleanCourseCandidate(normalized.slice(0, idx));
+            if (candidate.length >= 4) return candidate;
+        }
+    }
+
+    const courseCode = normalized.match(/\b([A-Z]{2,4}\d{3,4})\b/);
+    if (courseCode?.[1]) return courseCode[1];
+
+    return cleanCourseCandidate(normalized.slice(0, 80));
+}
+
+function cleanCourseCandidate(value: string): string {
+    return value
+        .replace(/^[-:| ]+/, '')
+        .replace(/[-:| ]+$/, '')
+        .trim()
+        .slice(0, 80) || 'Curso Desconocido';
+}
+
+export function ensureAbsoluteUrl(url: string): string {
+    const trimmed = url.trim();
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) return trimmed;
+    return `https://tecdigital.tec.ac.cr${trimmed.startsWith('/') ? '' : '/'}${trimmed}`;
+}
+
+function extractFolderId(url: string): string | null {
+    const patterns = [
+        /#\/(\d+)#\//,
+        /folder_id=(\d+)/,
+        /#\/folder\/(\d+)/,
+    ];
+
+    for (const pattern of patterns) {
+        const match = url.match(pattern);
+        if (match?.[1]) return match[1];
+    }
+    return null;
+}
+
+function buildDownloadUrl(fileId: unknown, objectId: unknown, fileName: string): string {
+    if (typeof fileId === 'number' || typeof fileId === 'string') {
+        return `https://tecdigital.tec.ac.cr/dotlrn/file-storage/download/${encodeURIComponent(fileName)}?file_id=${String(fileId)}`;
+    }
+    if (typeof objectId === 'number' || typeof objectId === 'string') {
+        return `https://tecdigital.tec.ac.cr/dotlrn/file-storage/download/${encodeURIComponent(fileName)}?object_id=${String(objectId)}`;
+    }
+    return `https://tecdigital.tec.ac.cr/dotlrn/file-storage/download/${encodeURIComponent(fileName)}`;
+}
+
+function pushUniqueFile(
+    files: NonNullable<RawNotification['files']>,
+    dedupe: Set<string>,
+    file: NonNullable<RawNotification['files']>[number],
+): void {
+    const key = `${file.download_url}|${file.file_name}`;
+    if (dedupe.has(key)) return;
+    dedupe.add(key);
+    files.push(file);
+}
+
+function sanitizeFileName(name: string): string {
+    return name.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'documento';
+}
+
+function guessFileNameFromUrl(url: string): string | null {
+    try {
+        const parsed = new URL(url);
+        const pathParts = parsed.pathname.split('/').filter(Boolean);
+        const candidate = decodeURIComponent(pathParts[pathParts.length - 1] ?? '');
+        return candidate || null;
+    } catch {
+        return null;
+    }
+}
+
+function inferMimeType(fileName: string, downloadUrl: string, mimeTypeCandidate?: unknown): string | undefined {
+    if (typeof mimeTypeCandidate === 'string' && mimeTypeCandidate.trim()) {
+        return mimeTypeCandidate;
+    }
+
+    const source = `${fileName} ${downloadUrl}`.toLowerCase();
+    if (source.includes('.pdf')) return 'application/pdf';
+    if (source.includes('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    if (source.includes('.doc')) return 'application/msword';
+    if (source.includes('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    if (source.includes('.ppt')) return 'application/vnd.ms-powerpoint';
+    if (source.includes('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    if (source.includes('.xls')) return 'application/vnd.ms-excel';
+    if (source.includes('.zip')) return 'application/zip';
+    if (source.includes('.txt')) return 'text/plain';
+    return undefined;
+}
+
+function hashString(str: string): string {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = (hash << 5) - hash + char;
+        hash |= 0;
+    }
+    return Math.abs(hash).toString(36);
+}
