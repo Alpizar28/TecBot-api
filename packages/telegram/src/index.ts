@@ -28,6 +28,14 @@ function formatDocumentSent(user: User, n: RawNotification, fileName: string, dr
     ].join('\n');
 }
 
+function formatDocumentDownload(user: User, n: RawNotification, fileName: string, url: string): string {
+    return [
+        `<b>${escapeHtml(n.course)}</b>`,
+        escapeHtml(fileName),
+        `<a href="${escapeHtml(url)}">Abrir en Drive</a>`,
+    ].join('\n');
+}
+
 function formatDocumentLink(user: User, n: RawNotification): string {
     return [
         `<b>${escapeHtml(n.course)}</b>`,
@@ -78,6 +86,10 @@ export class TelegramService {
 
     async sendDocumentSaved(user: User, n: RawNotification, fileName: string, driveFileId: string): Promise<void> {
         await this.sendMessage(user.telegram_chat_id, formatDocumentSent(user, n, fileName, driveFileId));
+    }
+
+    async sendDocumentDownload(user: User, n: RawNotification, fileName: string, url: string): Promise<void> {
+        await this.sendMessage(user.telegram_chat_id, formatDocumentDownload(user, n, fileName, url));
     }
 
     async sendDocumentLink(user: User, n: RawNotification): Promise<void> {

@@ -234,8 +234,8 @@ async function resolveDocumentFiles(
                 headers: { Accept: 'application/json, text/plain, */*' },
             });
 
-            if (folderRes.status === 200 && Array.isArray(folderRes.data)) {
-                for (const fileItem of folderRes.data as Array<Record<string, unknown>>) {
+            if (folderRes.status === 200) {
+                for (const fileItem of normalizeFolderResponse(folderRes.data)) {
                     const kind = String(fileItem.type ?? '').toLowerCase();
                     const fileId = fileItem.file_id;
                     const objectId = fileItem.object_id;
@@ -264,11 +264,72 @@ async function resolveDocumentFiles(
             const res = await client.client.get<string>(completeUrl);
             const html = String(res.data ?? '');
 
+            const htmlFolderId = extractFolderIdFromHtml(html);
+            if (htmlFolderId) {
+                const folderApiUrl = `https://tecdigital.tec.ac.cr/dotlrn/file-storage/view/folder-chunk?folder_id=${htmlFolderId}`;
+                const folderRes = await client.client.get(folderApiUrl, {
+                    headers: { Accept: 'application/json, text/plain, */*' },
+                });
+
+                if (folderRes.status === 200) {
+                    for (const fileItem of normalizeFolderResponse(folderRes.data)) {
+                        const kind = String(fileItem.type ?? '').toLowerCase();
+                        const fileId = fileItem.file_id;
+                        const objectId = fileItem.object_id;
+                        if (kind && kind !== 'file') continue;
+                        if (!fileId && !objectId) continue;
+
+                        const title = sanitizeFileName(
+                            String(fileItem.title ?? fileItem.name ?? `Documento-${fileId ?? objectId}`),
+                        );
+                        const downloadUrl =
+                            typeof fileItem.download_url === 'string' && fileItem.download_url
+                                ? ensureAbsoluteUrl(fileItem.download_url)
+                                : buildDownloadUrl(fileId, objectId, title);
+                        const mimeType = inferMimeType(title, downloadUrl, fileItem.mime_type);
+
+                        pushUniqueFile(files, dedupe, {
+                            file_name: title,
+                            download_url: downloadUrl,
+                            source_url: docLink,
+                            mime_type: mimeType,
+                        });
+                    }
+                }
+            }
+
             const downloadRegex = /\/dotlrn\/file-storage\/download\/[^\s"'<>]+/g;
             const idRegex = /(?:file_id|object_id)=([0-9]+)/g;
+            const downloadUrlRegex = /download_url"\s*:\s*"([^"]+)"/g;
+            const dataDownloadUrlRegex = /data-download-url\s*=\s*"([^"]+)"/g;
 
             for (const match of html.match(downloadRegex) ?? []) {
                 const normalized = ensureAbsoluteUrl(match);
+                const guessedName = guessFileNameFromUrl(normalized) ?? 'documento';
+                pushUniqueFile(files, dedupe, {
+                    file_name: sanitizeFileName(guessedName),
+                    download_url: normalized,
+                    source_url: docLink,
+                    mime_type: inferMimeType(guessedName, normalized),
+                });
+            }
+
+            let urlMatch: RegExpExecArray | null;
+            while ((urlMatch = downloadUrlRegex.exec(html)) !== null) {
+                const raw = unescapeJsonUrl(urlMatch[1]);
+                const normalized = ensureAbsoluteUrl(raw);
+                const guessedName = guessFileNameFromUrl(normalized) ?? 'documento';
+                pushUniqueFile(files, dedupe, {
+                    file_name: sanitizeFileName(guessedName),
+                    download_url: normalized,
+                    source_url: docLink,
+                    mime_type: inferMimeType(guessedName, normalized),
+                });
+            }
+
+            while ((urlMatch = dataDownloadUrlRegex.exec(html)) !== null) {
+                const raw = unescapeJsonUrl(urlMatch[1]);
+                const normalized = ensureAbsoluteUrl(raw);
                 const guessedName = guessFileNameFromUrl(normalized) ?? 'documento';
                 pushUniqueFile(files, dedupe, {
                     file_name: sanitizeFileName(guessedName),
@@ -470,6 +531,10 @@ function extractFolderId(url: string): string | null {
         /#\/(\d+)#\//,
         /folder_id=(\d+)/,
         /#\/folder\/(\d+)/,
+        /folderId=(\d+)/,
+        /folder_id%3D(\d+)/i,
+        /folderId%3D(\d+)/i,
+        /#\/folders\/(\d+)/,
     ];
 
     for (const pattern of patterns) {
@@ -513,6 +578,58 @@ function guessFileNameFromUrl(url: string): string | null {
     } catch {
         return null;
     }
+}
+
+function extractFolderIdFromHtml(html: string): string | null {
+    const patterns = [
+        /folder_id\s*[:=]\s*["']?(\d+)["']?/i,
+        /folderId\s*[:=]\s*["']?(\d+)["']?/i,
+    ];
+
+    for (const pattern of patterns) {
+        const match = html.match(pattern);
+        if (match?.[1]) return match[1];
+    }
+    return null;
+}
+
+function normalizeFolderResponse(data: unknown): Array<Record<string, unknown>> {
+    if (Array.isArray(data)) return data as Array<Record<string, unknown>>;
+    if (!data || typeof data !== 'object') return [];
+
+    const obj = data as Record<string, unknown>;
+    const candidateKeys = ['files', 'items', 'entries', 'data', 'children', 'results'];
+    for (const key of candidateKeys) {
+        const value = obj[key];
+        if (Array.isArray(value)) return value as Array<Record<string, unknown>>;
+    }
+
+    for (const value of Object.values(obj)) {
+        if (!Array.isArray(value)) continue;
+        if (value.some(isFileItemLike)) return value as Array<Record<string, unknown>>;
+    }
+
+    return [];
+}
+
+function isFileItemLike(value: unknown): boolean {
+    if (!value || typeof value !== 'object') return false;
+    const item = value as Record<string, unknown>;
+    return (
+        'file_id' in item ||
+        'object_id' in item ||
+        'download_url' in item ||
+        'name' in item ||
+        'title' in item
+    );
+}
+
+function unescapeJsonUrl(value: string): string {
+    return value
+        .replace(/\\u002F/gi, '/')
+        .replace(/\\u0026/gi, '&')
+        .replace(/\\\//g, '/')
+        .replace(/\\&/g, '&');
 }
 
 function inferMimeType(fileName: string, downloadUrl: string, mimeTypeCandidate?: unknown): string | undefined {

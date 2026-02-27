@@ -157,7 +157,7 @@ async function handleDocumentNotification(
                     await safeTelegram(
                         user,
                         notification,
-                        () => telegram.sendDocumentLink(user, notification),
+                        () => telegram.sendDocumentDownload(user, notification, file.file_name, file.download_url),
                         'telegram_doc_fallback',
                     );
                     return false;
@@ -165,6 +165,18 @@ async function handleDocumentNotification(
             }),
         );
 
+        return results.every(Boolean);
+    }
+
+    if (notification.files && notification.files.length > 0) {
+        const results = await Promise.all(
+            notification.files.map((file) => safeTelegram(
+                user,
+                notification,
+                () => telegram.sendDocumentDownload(user, notification, file.file_name, file.download_url),
+                'telegram_doc_download',
+            )),
+        );
         return results.every(Boolean);
     }
 
