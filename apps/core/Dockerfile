@@ -9,10 +9,10 @@ COPY apps/core/ ./apps/core/
 COPY scripts/ ./scripts/
 
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @tec-brain/types build
-RUN pnpm --filter @tec-brain/database build
-RUN pnpm --filter @tec-brain/telegram build
-RUN pnpm --filter @tec-brain/drive build
+RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm --filter @tec-brain/types build
+RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm --filter @tec-brain/database build
+RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm --filter @tec-brain/telegram build
+RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm --filter @tec-brain/drive build
 
 ENV NODE_ENV=production
 
