@@ -10,7 +10,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  */
 export async function runMigrations(migrationsDir?: string): Promise<void> {
     const pool = getPool();
-    const dir = migrationsDir ?? path.join(__dirname, 'migrations');
+    const compiledDir = path.join(__dirname, 'migrations');
+    const sourceDir = path.join(__dirname, '..', 'src', 'migrations');
+    const dir = migrationsDir ?? (fs.existsSync(compiledDir) ? compiledDir : sourceDir);
 
     const files = fs
         .readdirSync(dir)
