@@ -66,10 +66,11 @@ services:
     environment:
       PORT: "3002"
       SCRAPER_URL: "http://scraper:3001"
+      DATABASE_URL: "postgresql://tecbrain:${POSTGRES_PASSWORD}@db:5432/tecbrain"
     ports:
       - "${CORE_PORT:-3002}:3002"
     volumes:
-      - drive_creds:/app/data/credentials:ro
+      - ../data/credentials:/app/data/credentials:ro
     depends_on:
       db:
         condition: service_healthy
@@ -85,4 +86,3 @@ services:
 volumes:
   postgres_data:
   sessions_data:
-  drive_creds:
