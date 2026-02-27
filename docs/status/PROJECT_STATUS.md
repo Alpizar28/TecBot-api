@@ -60,8 +60,8 @@ tec-brain/
 │   └── drive/          # Cliente Google Drive API v3 (OAuth/SA)
 ├── scripts/
 │   └── add-user.ts     # Alta/actualización de usuarios en DB
-├── docker-compose.yml  # db + scraper + core
-└── deploy.sh           # deploy por git pull + docker compose
+├── infra/docker-compose.yml  # db + scraper + core
+└── infra/deploy.sh           # deploy por git pull + docker compose
 ```
 
 ## Tecnologías y Herramientas
@@ -94,7 +94,7 @@ tec-brain/
 ### Operación / Deploy
 - Docker / Docker Compose
 - AWS EC2 (producción observada)
-- Script `deploy.sh` para pull + rebuild
+- Script `infra/deploy.sh` para pull + rebuild
 
 ### Calidad / Tooling
 - ESLint
@@ -235,13 +235,13 @@ Servicio HTTP + cron que administra el ciclo completo de automatización.
 - Link directo al archivo de Drive en mensajes de documento subido.
 
 ### H. Operación / DevOps
-- `docker-compose.yml` con 3 servicios (`db`, `scraper`, `core`).
+- `infra/docker-compose.yml` con 3 servicios (`db`, `scraper`, `core`).
 - Healthchecks para `db`, `scraper`, `core`.
 - Volúmenes persistentes:
   - `postgres_data`
   - `sessions_data`
   - `drive_creds`
-- `deploy.sh` para pull/rebuild/restart y seguimiento de logs.
+- `infra/deploy.sh` para pull/rebuild/restart y seguimiento de logs.
 
 ## Contratos de Datos (Resumen)
 

@@ -67,7 +67,6 @@ Variables clave:
 - `CRON_SCHEDULE`
 - `CORE_CONCURRENCY`
 - `SCRAPER_URL`
-- `SCRAPER_MODE` (`api` default, `playwright` rollback temporal)
 - `SESSION_DIR`
 
 Generar `DB_ENCRYPTION_KEY`:
@@ -93,7 +92,7 @@ El proyecto soporta dos modos:
 ## Levantar en local con Docker
 
 ```bash
-docker compose up -d --build
+docker compose -f infra/docker-compose.yml up -d --build
 ```
 
 Servicios:
@@ -106,7 +105,7 @@ Servicios:
 ### Solo DB por Docker + apps en local
 
 ```bash
-docker compose up -d db
+docker compose -f infra/docker-compose.yml up -d db
 pnpm dev:scraper
 pnpm dev:core
 ```
@@ -119,8 +118,7 @@ pnpm dev:core
 
 ### Scraper (`apps/scraper`)
 - `GET /health`
-- `POST /scrape/:userId`
-- `POST /process-sequential/:userId` (modo recomendado API-only)
+- `POST /process-sequential/:userId`
 
 Ejemplo trigger manual:
 
@@ -189,18 +187,18 @@ pnpm format
 ## Deploy (script incluido)
 
 ```bash
-./deploy.sh
+./infra/deploy.sh
 ```
 
 El script hace:
 - `git pull origin main`
-- `docker compose up -d --build`
+- `docker compose -f infra/docker-compose.yml up -d --build`
 - stream de logs de `core`
 
 ## Documentación de estado del proyecto
 
 Ver reporte amplio en:
-- `PROJECT_STATUS.md`
+- `docs/status/PROJECT_STATUS.md`
 
 ## Limitaciones conocidas
 

@@ -1,8 +1,8 @@
 # Rollout Plan (Canary -> 100%)
 
-## Feature flag
-- `SCRAPER_MODE=api` (default).
-- `SCRAPER_MODE=playwright` como rollback temporal.
+## Estrategia de despliegue
+- Despliegue directo API-only.
+- Rollback por release/tag anterior estable.
 
 ## Etapas
 1. Canary 10% usuarios activos por 48h.
@@ -16,6 +16,6 @@
 - Tasa de upload estable.
 
 ## Rollback
-- Cambiar `SCRAPER_MODE=playwright`.
+- Volver al release/tag anterior.
 - Reiniciar servicios.
 - Mantener logs para RCA.

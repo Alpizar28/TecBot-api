@@ -4,11 +4,10 @@ import { TelegramService } from '@tec-brain/telegram';
 import { DriveService } from '@tec-brain/drive';
 import { dispatch, type DispatchResult } from './dispatcher.js';
 import pLimit from 'p-limit';
-import type { RawNotification, ScrapeResponse } from '@tec-brain/types';
+import type { ScrapeResponse } from '@tec-brain/types';
 import { logger } from './logger.js';
 
 const SCRAPER_URL = process.env.SCRAPER_URL ?? 'http://scraper:3001';
-const SCRAPER_MODE = process.env.SCRAPER_MODE ?? 'api';
 
 // Singletons shared across cron invocations
 const telegram = new TelegramService(process.env.TELEGRAM_BOT_TOKEN ?? '');
@@ -98,31 +97,6 @@ async function processUser(
 
     const password = decrypt(user.tec_password_enc);
 
-    if (SCRAPER_MODE === 'playwright') {
-        const response = await axios.post<ScrapeResponse>(
-            `${SCRAPER_URL}/scrape/${user.id}`,
-            {
-                username: user.tec_username,
-                password,
-            },
-            { timeout: 300_000 },
-        );
-
-        if (response.data.status === 'error') {
-            throw new Error(response.data.error || 'Unknown scraper error');
-        }
-
-        const dispatchResults = await dispatchBatch(user.id, response.data.notifications, response.data.cookies);
-        logger.info({
-            component: 'orchestrator',
-            userId: user.id,
-            userName: user.name,
-            mode: SCRAPER_MODE,
-            notifications: dispatchResults.dispatched,
-        }, 'Scrape and local dispatch finished');
-        return dispatchResults;
-    }
-
     const response = await axios.post<ScrapeResponse>(
         `${SCRAPER_URL}/process-sequential/${user.id}`,
         {
@@ -141,24 +115,7 @@ async function processUser(
         component: 'orchestrator',
         userId: user.id,
         userName: user.name,
-        mode: SCRAPER_MODE,
+        mode: 'api',
     }, 'Sequential scrape finished');
     return { dispatched: 0, processed: 0, partial: 0 };
-}
-
-async function dispatchBatch(
-    userId: string,
-    notifications: RawNotification[],
-    cookies: ScrapeResponse['cookies'],
-): Promise<{ dispatched: number; processed: number; partial: number }> {
-    let processed = 0;
-    let partial = 0;
-
-    for (const notification of notifications) {
-        const result = await handleInternalDispatch(userId, notification, cookies);
-        if (result.processed) processed += 1;
-        else partial += 1;
-    }
-
-    return { dispatched: notifications.length, processed, partial };
 }

@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import sensible from '@fastify/sensible';
 import { SessionManager } from './sessions/session-manager.js';
-import { extractNotifications, processNotificationsSequentially } from './extractors/notifications.js';
+import { processNotificationsSequentially } from './extractors/notifications.js';
 import type { ScrapeResponse } from '@tec-brain/types';
 
 const SESSION_DIR = process.env.SESSION_DIR ?? './data/sessions';
@@ -23,71 +23,6 @@ export function buildServer(): FastifyInstance {
     fastify.get('/health', async (_, reply) => {
         return reply.send({ status: 'ok', uptime_s: Math.floor(process.uptime()) });
     });
-
-    // ── Scrape Endpoint ───────────────────────────────────────────────────────
-    fastify.post<{
-        Params: { userId: string };
-        Body: { username: string; password: string; keywords?: string[] };
-    }>(
-        '/scrape/:userId',
-        {
-            schema: {
-                params: {
-                    type: 'object',
-                    properties: { userId: { type: 'string' } },
-                    required: ['userId'],
-                },
-                body: {
-                    type: 'object',
-                    properties: {
-                        username: { type: 'string' },
-                        password: { type: 'string' },
-                        keywords: { type: 'array', items: { type: 'string' } },
-                    },
-                    required: ['username', 'password'],
-                },
-            },
-        },
-        async (request, reply): Promise<ScrapeResponse> => {
-            const { userId } = request.params;
-            const { username, password, keywords = [] } = request.body;
-
-            try {
-                const client = await sessionManager.getClient(username, password);
-
-                let notifications = await extractNotifications(client);
-
-                // Apply keyword filter if provided
-                if (keywords.length > 0) {
-                    notifications = notifications.filter((n) =>
-                        keywords.some((kw) =>
-                            n.course.toLowerCase().includes(kw.toLowerCase()),
-                        ),
-                    );
-                }
-
-                const cookies = await sessionManager.getCookies(client);
-
-                return reply.send({
-                    status: 'success',
-                    user_id: userId,
-                    notifications,
-                    cookies,
-                } satisfies ScrapeResponse);
-            } catch (err) {
-                const error = err instanceof Error ? err.message : String(err);
-                request.log.error({ err, userId }, 'Scrape failed');
-
-                return reply.status(500).send({
-                    status: 'error',
-                    user_id: userId,
-                    notifications: [],
-                    cookies: [],
-                    error,
-                } satisfies ScrapeResponse);
-            }
-        },
-    );
 
     // ── Sequential Scrape Endpoint ────────────────────────────────────────────
     fastify.post<{

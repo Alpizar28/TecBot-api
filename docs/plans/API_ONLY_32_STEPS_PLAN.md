@@ -14,7 +14,7 @@ Referencia de cierre tecnico (32/32 en codigo/docs):
 ## Pendientes unicos
 
 ### P1. Canary 10%
-- Accion: ejecutar `SCRAPER_MODE=api` para 10% de usuarios activos.
+- Accion: desplegar version API-only para 10% de usuarios activos.
 - Duracion sugerida: 48h.
 - Exito:
   - Sin aumento relevante de `notifications_partial`.
@@ -41,7 +41,7 @@ Referencia de cierre tecnico (32/32 en codigo/docs):
 - Exito: decision Go-Live definitiva firmada.
 
 ## Rollback (si aplica)
-- Cambiar `SCRAPER_MODE=playwright` temporalmente.
+- Volver al release/tag anterior estable.
 - Reiniciar servicios y documentar RCA.
 
 ## Criterio final de completitud

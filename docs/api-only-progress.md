@@ -34,8 +34,8 @@ Estado: Completado en codigo/documentacion operativa dentro del repositorio.
 28. Logging estructurado estandarizado: `apps/scraper/src/logger.ts`, `apps/core/src/logger.ts`, `packages/drive/src/logger.ts`.
 29. Metricas de ciclo agregadas: `apps/core/src/orchestrator.ts`.
 30. Runbook de alertas definido: `docs/alerts-runbook.md`.
-31. Plan de rollout/canary+rollback definido + flag: `docs/rollout-plan.md`, `apps/core/src/orchestrator.ts` (`SCRAPER_MODE`).
-32. Retiro Playwright en produccion: `apps/scraper/Dockerfile`, `README.md`, `PROJECT_STATUS.md`.
+31. Plan de rollout/canary+rollback definido: `docs/rollout-plan.md`.
+32. Limpieza final de componentes no API-only: `apps/scraper/Dockerfile`, `README.md`, `docs/status/PROJECT_STATUS.md`.
 
 ## Validaciones
 - Build workspace: `pnpm -r build`.

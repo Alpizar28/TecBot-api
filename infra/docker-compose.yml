@@ -69,7 +69,6 @@ services:
     environment:
       PORT: "3002"
       SCRAPER_URL: "http://scraper:3001"
-      SCRAPER_MODE: "${SCRAPER_MODE:-api}"
     ports:
       - "3002:3002"
     volumes:

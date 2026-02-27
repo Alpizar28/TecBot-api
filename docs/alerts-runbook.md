@@ -11,7 +11,7 @@
 2. Verificar salud de TEC endpoints internos.
 3. Verificar validez de cookies/sesion.
 4. Verificar conectividad Drive/Telegram.
-5. Si impacto alto: activar rollback con `SCRAPER_MODE=playwright` temporal.
+5. Si impacto alto: activar rollback al release/tag anterior estable.
 
 ## Cierre de incidente
 - Registrar causa raiz.

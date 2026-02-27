@@ -13,7 +13,7 @@ Fecha de baseline: 2026-02-27
 - `deleted_in_tec`
 
 ## Meta operativa para API-only
-- Reducir consumo RAM vs flujo Playwright.
+- Mantener consumo RAM bajo y estable en produccion.
 - Mantener o mejorar tasa de `documents_resolved`.
 - Mantener `deleted_in_tec` alineado 1:1 con `processed=true`.
 
