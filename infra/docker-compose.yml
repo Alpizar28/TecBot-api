@@ -3,7 +3,6 @@ services:
 
   db:
     image: postgres:15-alpine
-    container_name: tec-brain-db
     restart: unless-stopped
     deploy:
       resources:
@@ -16,7 +15,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: tecbrain
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -29,9 +28,8 @@ services:
 
   scraper:
     build:
-      context: .
+      context: ..
       dockerfile: apps/scraper/Dockerfile
-    container_name: tec-brain-scraper
     restart: unless-stopped
     deploy:
       resources:
@@ -39,11 +37,11 @@ services:
           memory: 300M
         reservations:
           memory: 100M
-    env_file: .env
+    env_file: ../.env
     environment:
       PORT: "3001"
     ports:
-      - "3001:3001"
+      - "${SCRAPER_PORT:-3001}:3001"
     volumes:
       - sessions_data:/app/data/sessions
     healthcheck:
@@ -55,9 +53,8 @@ services:
 
   core:
     build:
-      context: .
+      context: ..
       dockerfile: apps/core/Dockerfile
-    container_name: tec-brain-core
     restart: unless-stopped
     deploy:
       resources:
@@ -65,12 +62,12 @@ services:
           memory: 400M
         reservations:
           memory: 100M
-    env_file: .env
+    env_file: ../.env
     environment:
       PORT: "3002"
       SCRAPER_URL: "http://scraper:3001"
     ports:
-      - "3002:3002"
+      - "${CORE_PORT:-3002}:3002"
     volumes:
       - drive_creds:/app/data/credentials:ro
     depends_on:
