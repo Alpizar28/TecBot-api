@@ -99,14 +99,16 @@ export async function dispatch(
         logStructuredError(user, notification, 'dispatch_internal', error);
     }
 
-    if (processed) {
+    if (processed || exists) {
         if (!exists) {
+            log.info('Marking new notification as seen');
             await insertNotification(user.id, notification);
         } else if (shouldRetryDocument && notification.document_status === 'resolved') {
+            log.info('Updating existing document notification status to resolved');
             await updateNotificationDocumentStatus(user.id, notification.external_id, 'resolved');
         }
     } else {
-        log.warn('Notification had partial/failed processing; skipping persistence');
+        log.warn('Notification had partial/failed processing and was not previously seen; skipping persistence to allow retry');
     }
 
     return {
@@ -154,13 +156,12 @@ async function handleDocumentNotification(
                     return notified;
                 } catch (error) {
                     logStructuredError(user, notification, 'drive_upload', error);
-                    await safeTelegram(
+                    return await safeTelegram(
                         user,
                         notification,
                         () => telegram.sendDocumentDownload(user, notification, file.file_name, file.download_url),
                         'telegram_doc_fallback',
                     );
-                    return false;
                 }
             }),
         );
