@@ -1,6 +1,6 @@
 # Deploy y Prueba en Ubuntu (Docker)
 
-Esta guía deja `TecBot-api` corriendo en un servidor Ubuntu usando Docker Compose, y valida el flujo completo.
+Esta guía deja `TecBot-api` corriendo en un servidor Ubuntu usando Docker Compose, y valida el flujo disponible hoy. La subida a Google Drive sigue sin funcionar, así que la validación debe centrarse en scraping y Telegram.
 
 ## 1) Requisitos en Ubuntu
 
@@ -122,7 +122,7 @@ En `core`, validar:
 ## 10) Criterio de prueba exitosa
 
 - Llega mensaje a Telegram.
-- Si hay documentos, se suben a Drive.
+- Si hay documentos, hoy se espera fallback por Telegram; no se debe considerar obligatorio que se suban a Drive.
 - No hay fallos repetitivos de login/sesión.
 - No hay borrado en TEC cuando `processed=false`.
 
@@ -153,8 +153,10 @@ docker compose -f infra/docker-compose.yml up -d --build
 - Verifica contenedor `db` en `docker compose ps`.
 
 ### No sube a Drive
+- Estado actual conocido: la subida a Drive todavía no funciona de forma confiable.
 - Verifica ruta y formato de `credentials.json`.
 - Si OAuth, confirma `token.json` válido.
+- Aunque las credenciales estén bien, puede seguir fallando hasta que se corrija la integración.
 
 ### No envía Telegram
 - Verifica `TELEGRAM_BOT_TOKEN`.

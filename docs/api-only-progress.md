@@ -1,7 +1,7 @@
 # API-Only Progress Ledger (32/32)
 
 Fecha: 2026-02-27
-Estado: Completado en codigo/documentacion operativa dentro del repositorio.
+Estado: Completado en codigo/documentacion para el flujo API-only base. La integracion con Drive no esta lista y no debe considerarse operativa.
 
 ## Mejoras posteriores (2026-02-27)
 - Reintentos HTTP con backoff+jitter en scraper/core/drive.
@@ -32,7 +32,7 @@ Estado: Completado en codigo/documentacion operativa dentro del repositorio.
 21. Delete TEC solo con `processed=true`: `apps/scraper/src/extractors/notifications.ts`.
 22. Sin persistencia en procesamiento parcial: `apps/core/src/dispatcher.ts`.
 23. Reintentos limpios tras fallo: `apps/core/src/dispatcher.ts`.
-24. Download autenticado TEC->Drive mantenido: `packages/drive/src/index.ts`.
+24. Download autenticado TEC->Drive mantenido a nivel de codigo, pero Drive no esta listo para uso operativo: `packages/drive/src/index.ts`.
 25. Dedupe upload blindado por hash: `apps/core/src/dispatcher.ts` + `packages/database/src/queries.ts`.
 26. Paridad Telegram mantenida por tipo/fallback: `packages/telegram/src/index.ts` + flujo dispatcher.
 27. Consistencia en multi-archivo: `apps/core/src/dispatcher.ts`.
@@ -47,4 +47,4 @@ Estado: Completado en codigo/documentacion operativa dentro del repositorio.
 - Tests clave: `pnpm --filter @tec-brain/scraper test`, `pnpm --filter @tec-brain/core test`.
 
 ## Nota operativa
-La ejecucion de canary 10/50/100 y observacion de 7 dias requiere entorno productivo; el runbook y plan quedaron listos para ejecucion sin ambiguedad.
+La ejecucion de canary 10/50/100 y observacion de 7 dias requiere entorno productivo; el runbook y plan quedaron listos para ejecucion del flujo base. Drive no esta listo, asi que cualquier validacion productiva debe asumir fallback por Telegram para documentos.

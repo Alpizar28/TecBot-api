@@ -9,7 +9,7 @@
 - Clave: `user_id + file_hash`.
 - Hash: `sha256(download_url + file_name)`.
 - Tabla: `uploaded_files`.
-- Efecto: evita resubir el mismo archivo a Drive.
+- Efecto: evita reintentos duplicados cuando Drive este listo; hoy no debe asumirse upload funcional.
 
 ## Reintentos
 - Si procesamiento es parcial/fallido: no persistir como completado.

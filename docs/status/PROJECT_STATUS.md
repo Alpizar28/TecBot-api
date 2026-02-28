@@ -1,21 +1,21 @@
 # PROJECT STATUS - TEC Brain
 
-Fecha de actualización: 2026-02-25
+Fecha de actualización: 2026-02-28
 
 ## Resumen Ejecutivo
 
-`tec-brain` es un backend monorepo en TypeScript que automatiza la extracción de notificaciones académicas desde TEC Digital y las distribuye por Telegram y Google Drive.
+`tec-brain` es un backend monorepo en TypeScript que automatiza la extracción de notificaciones académicas desde TEC Digital y las distribuye por Telegram. Google Drive no está listo: la integración sigue en revisión porque la subida de archivos todavía no funciona.
 
-El proyecto está funcional en producción (AWS + Docker) y actualmente realiza:
+El proyecto está funcional en producción (AWS + Docker) para scraping y Telegram, y actualmente realiza:
 - Login automático al TEC Digital con sesiones persistentes por usuario (API-only JSON).
 - Extracción de notificaciones (`noticia`, `evaluacion`, `documento`).
 - Resolución de archivos de documentos (incluye estrategia para páginas Angular del TEC).
 - Orquestación por cron y ejecución manual vía API.
 - Deduplicación de notificaciones y archivos subidos.
-- Subida de archivos a Google Drive (con OAuth de usuario o Service Account, según credencial).
-- Envío de mensajes a Telegram (formato minimalista, incluyendo link directo a Drive para documentos subidos).
+- Envío de mensajes a Telegram.
+- Fallback de documentos por Telegram cuando falla la subida a Google Drive.
 
-## Estado Actual (Operativo)
+## Estado Actual (Parcialmente Operativo)
 
 ### Producción (AWS) - estado observado en esta sesión
 
@@ -24,11 +24,11 @@ El proyecto está funcional en producción (AWS + Docker) y actualmente realiza:
   - `tec-brain-db` (PostgreSQL)
   - `tec-brain-scraper` (API-only scraper service)
   - `tec-brain-core` (orquestador + API + cron)
-- Integración de Google Drive migrada a OAuth de usuario (para evitar el error de cuota de Service Account).
+- Integración de Google Drive migrada a OAuth de usuario (para evitar el error de cuota de Service Account), pero Drive no está listo y la subida real de archivos sigue fallando.
 - Se validó ejecución manual del ciclo (`POST /api/run-now`).
 - Se validó envío real de mensajes por Telegram con el formato nuevo.
-- Se corrigió duplicación de carpetas de usuario/curso causada por condición de carrera al subir múltiples archivos.
-- Se corrigió parsing del nombre de curso para usar nombres completos (mejor matching con carpetas existentes en Drive).
+- La persistencia de notificaciones ya no depende del éxito de Drive.
+- Las correcciones de carpetas y matching en Drive siguen en el código, pero no deben considerarse validadas mientras el upload no funcione.
 
 ### Configuración funcional observada
 
@@ -43,7 +43,7 @@ Automatizar el flujo:
 2. Detectar cambios/notificaciones relevantes.
 3. Enviar avisos por Telegram.
 4. Descargar documentos nuevos del TEC.
-5. Organizarlos en Google Drive por usuario y curso.
+5. Organizarlos en Google Drive por usuario y curso cuando la subida vuelva a estar operativa.
 6. Evitar duplicados y reenvíos innecesarios.
 
 ## Arquitectura del Proyecto
@@ -163,14 +163,14 @@ Servicio HTTP + cron que administra el ciclo completo de automatización.
 8. Según tipo:
    - `noticia` -> Telegram
    - `evaluacion` -> Telegram
-   - `documento` -> Drive + Telegram (o fallback)
+   - `documento` -> Telegram y, cuando funcione, Drive
 9. Si es documento:
-   - crea/usa carpeta de usuario en Drive (una vez por notificación)
-   - crea/usa carpeta de curso (nombre completo)
+   - intenta crear/usar carpeta de usuario en Drive (una vez por notificación)
+   - intenta crear/usar carpeta de curso (nombre completo)
    - descarga archivo desde TEC con cookies
-   - sube a Drive
-   - guarda registro en `uploaded_files`
-   - envía mensaje Telegram con link directo al archivo en Drive
+   - intenta subir a Drive
+   - solo guarda registro en `uploaded_files` si el upload fue exitoso
+   - envía mensaje Telegram con fallback mientras no haya archivo en Drive
 10. Persiste notificación procesada en DB.
 
 ## Funcionalidades Implementadas (Inventario Completo)
@@ -212,27 +212,28 @@ Servicio HTTP + cron que administra el ciclo completo de automatización.
 - Deduplicación de archivos subidos por hash (`download_url + file_name`).
 - Tabla `uploaded_files` para evitar uploads duplicados.
 
-### F. Google Drive (organización y subida)
+### F. Google Drive (no listo para uso operativo)
 - Soporte de autenticación con Service Account.
 - Soporte de autenticación con OAuth Client + `token.json`.
 - Búsqueda de carpeta por nombre + parent (`findFolder`).
 - Creación de carpeta (`createFolder`).
 - Garantía de existencia (`ensureFolder`).
-- Descarga desde TEC con cookies y upload streaming a Drive.
+- Descarga desde TEC con cookies y flujo de upload streaming preparado, pero la subida real a Drive sigue fallando.
 - Organización por jerarquía:
   - carpeta raíz configurada por usuario (`drive_root_folder_id`)
   - carpeta de usuario (`user.name`)
   - carpeta de curso (`notification.course`, nombre completo)
 - Corrección aplicada para evitar creación múltiple de carpetas por condición de carrera en notificaciones con varios archivos.
+- Estado actual: Drive no está listo. No considerar esta sección como validada en producción hasta resolver el fallo de upload.
 
 ### G. Telegram (mensajería)
 - Envío de mensajes HTML vía Bot API.
 - Notificaciones para `noticia`.
 - Notificaciones para `evaluacion`.
-- Confirmación de documento guardado en Drive.
+- Fallback para documentos cuando Drive falla.
 - Fallback a link del curso cuando falla upload a Drive.
 - Formato actual minimalista (sin fecha).
-- Link directo al archivo de Drive en mensajes de documento subido.
+- Link directo al archivo de Drive solo aplica cuando el upload vuelva a funcionar.
 
 ### H. Operación / DevOps
 - `infra/docker-compose.yml` con 3 servicios (`db`, `scraper`, `core`).

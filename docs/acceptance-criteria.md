@@ -14,14 +14,14 @@
 
 ## C3 - Documento simple
 - Input: notificacion documento con archivo resoluble.
-- Expected: descarga autenticada + upload Drive + mensaje de confirmacion.
-- DB: `uploaded_files` insertado + notificacion insertada.
+- Expected: descarga autenticada + intento de upload Drive + fallback por Telegram mientras Drive siga caido.
+- DB: notificacion insertada; `uploaded_files` solo si el upload realmente fue exitoso.
 - TEC delete: solo con `processed=true`.
 
 ## C4 - Documento multiple
 - Input: notificacion documento con N archivos.
-- Expected: todos los archivos deduplicados y procesados.
-- DB: N registros de upload (sin duplicados).
+- Expected: todos los archivos deduplicados y procesados, con fallback si Drive falla.
+- DB: registros de upload solo para los archivos que si logren subirse.
 - TEC delete: solo si todos los pasos requeridos fueron exitosos.
 
 ## C5 - Documento no resoluble

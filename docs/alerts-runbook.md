@@ -11,7 +11,7 @@
 1. Revisar logs por `userId`, `externalId`, `component`.
 2. Verificar salud de TEC endpoints internos.
 3. Verificar validez de cookies/sesion.
-4. Verificar conectividad Drive/Telegram.
+4. Verificar Telegram y, para Drive, asumir que hoy no esta listo; cualquier alerta de upload debe tratarse como falla conocida hasta nuevo aviso.
 5. Si impacto alto: activar rollback al release/tag anterior estable.
 
 ## Variables operativas

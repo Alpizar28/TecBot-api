@@ -33,7 +33,7 @@ Referencia de cierre tecnico (32/32 en codigo/docs):
 - Duracion sugerida: 7 dias de observacion.
 - Exito:
   - Operacion estable continua.
-  - Sin regresion funcional en Telegram/Drive.
+  - Sin regresion funcional en Telegram. Drive no esta listo y no debe usarse como criterio de salida estable.
 
 ### P4. Cierre operativo
 - Accion: emitir acta de cierre con metricas finales y lecciones.

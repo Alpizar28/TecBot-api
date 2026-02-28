@@ -9,3 +9,7 @@ Historial activo del proyecto API-only.
 - Heuristicas refinadas de tipo/curso/archivos.
 - Validacion estricta para eliminar notificaciones en TEC solo con `processed=true`.
 - Tests de heuristicas y dispatcher agregados.
+
+## 2026-02-28
+- Documentacion corregida para reflejar que la subida a Google Drive todavia no funciona.
+- Se mantiene fallback por Telegram como comportamiento operativo para documentos.

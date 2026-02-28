@@ -1,14 +1,14 @@
 # TEC Brain
 
-Automatización académica para TEC Digital: extrae notificaciones y documentos por API interna, los envía por Telegram y guarda archivos en Google Drive.
+Automatización académica para TEC Digital: extrae notificaciones y documentos por API interna y los envía por Telegram. Google Drive no está listo: la integración existe en código, pero la subida de archivos todavía no funciona.
 
 ## Qué hace
 
 - Scrapea TEC Digital por API interna (sesiones HTTP persistentes por usuario).
 - Detecta `noticias`, `evaluaciones` y `documentos`.
 - Envía notificaciones a Telegram.
-- Descarga documentos autenticados y los sube a Google Drive.
-- Organiza archivos por usuario y curso.
+- Descarga documentos autenticados y mantiene preparado el flujo de subida a Google Drive, pero Drive no está listo y ese upload todavía no funciona.
+- Mantiene la organización esperada por usuario y curso cuando se reactive Drive.
 - Evita duplicados (notificaciones y archivos).
 - Permite ejecución por cron y trigger manual (`/api/run-now`).
 
@@ -162,14 +162,14 @@ Mensajes minimalistas:
 - descripción o nombre del archivo
 - link corto
 
-Para documentos subidos, envía link directo al archivo de Drive.
+Mientras la subida a Drive siga fallando, los documentos usan fallback por Telegram y no se debe asumir que habrá link directo al archivo en Drive.
 
 ## Deduplicación (importante)
 
 El sistema evita duplicados en dos niveles:
 
 - `notifications` -> no reenvía la misma notificación por usuario
-- `uploaded_files` -> no resube el mismo archivo por usuario
+- `uploaded_files` -> evita reintentos duplicados cuando la subida a Drive vuelva a estar operativa
 
 Si borras archivos en Drive y quieres reprocesar documentos viejos, también debes limpiar estas tablas en PostgreSQL.
 
@@ -213,6 +213,7 @@ Ver reporte amplio en:
 ## Limitaciones conocidas
 
 - El scraping depende de endpoints internos de TEC Digital (pueden cambiar sin previo aviso).
+- Google Drive no está listo. La subida no está funcionando aún y la documentación asume fallback por Telegram para documentos.
 - Cobertura de tests aún en expansión.
 - No hay CI/CD formal en el repo actualmente.
 
