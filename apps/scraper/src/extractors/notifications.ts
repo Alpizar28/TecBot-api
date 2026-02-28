@@ -228,23 +228,30 @@ async function resolveDocumentFiles(
         const folderId = extractFolderId(completeUrl);
 
         if (folderId) {
-            extractorLogger.debug({ folderId }, 'Detected folder id, calling folder-chunk API');
-            const folderApiUrl = `https://tecdigital.tec.ac.cr/dotlrn/file-storage/view/folder-chunk?folder_id=${folderId}`;
+            extractorLogger.debug({ folderId }, 'Detected folder id, calling folder API');
+            const folderApiUrl = `https://tecdigital.tec.ac.cr/dotlrn/file-storage/api/folder/${folderId}`;
             const folderRes = await client.client.get(folderApiUrl, {
                 headers: { Accept: 'application/json, text/plain, */*' },
             });
 
             if (folderRes.status === 200) {
-                for (const fileItem of normalizeFolderResponse(folderRes.data)) {
-                    const kind = String(fileItem.type ?? '').toLowerCase();
+                // The new endpoint returns an object with an "elements" array.
+                // normalizeFolderResponse expects an array, so if it's an object with "elements", pass that.
+                const elements = folderRes.data && Array.isArray(folderRes.data.elements)
+                    ? folderRes.data.elements
+                    : normalizeFolderResponse(folderRes.data);
+
+                for (const fileItem of elements) {
+                    const kind = String(fileItem.type ?? fileItem.fs_type ?? '').toLowerCase();
                     const fileId = fileItem.file_id;
                     const objectId = fileItem.object_id;
-                    if (kind && kind !== 'file') continue;
+                    // Usually we only want files, not subfolders. But subfolders might be typed as 'folder' in fs_type.
+                    if (kind && kind !== 'file' && kind !== 'application/pdf' && !kind.includes('application/')) continue;
                     if (!fileId && !objectId) continue;
 
-                    const title = sanitizeFileName(
-                        String(fileItem.title ?? fileItem.name ?? `Documento-${fileId ?? objectId}`),
-                    );
+                    const extractedTitle = fileItem.title ?? fileItem.name ?? fileItem.file_upload_name;
+                    const title = sanitizeFileName(String(extractedTitle ?? `Documento-${fileId ?? objectId}`));
+
                     const downloadUrl =
                         typeof fileItem.download_url === 'string' && fileItem.download_url
                             ? ensureAbsoluteUrl(fileItem.download_url)
@@ -266,22 +273,26 @@ async function resolveDocumentFiles(
 
             const htmlFolderId = extractFolderIdFromHtml(html);
             if (htmlFolderId) {
-                const folderApiUrl = `https://tecdigital.tec.ac.cr/dotlrn/file-storage/view/folder-chunk?folder_id=${htmlFolderId}`;
+                const folderApiUrl = `https://tecdigital.tec.ac.cr/dotlrn/file-storage/api/folder/${htmlFolderId}`;
                 const folderRes = await client.client.get(folderApiUrl, {
                     headers: { Accept: 'application/json, text/plain, */*' },
                 });
 
                 if (folderRes.status === 200) {
-                    for (const fileItem of normalizeFolderResponse(folderRes.data)) {
-                        const kind = String(fileItem.type ?? '').toLowerCase();
+                    const elements = folderRes.data && Array.isArray(folderRes.data.elements)
+                        ? folderRes.data.elements
+                        : normalizeFolderResponse(folderRes.data);
+
+                    for (const fileItem of elements) {
+                        const kind = String(fileItem.type ?? fileItem.fs_type ?? '').toLowerCase();
                         const fileId = fileItem.file_id;
                         const objectId = fileItem.object_id;
-                        if (kind && kind !== 'file') continue;
+                        if (kind && kind !== 'file' && kind !== 'application/pdf' && !kind.includes('application/')) continue;
                         if (!fileId && !objectId) continue;
 
-                        const title = sanitizeFileName(
-                            String(fileItem.title ?? fileItem.name ?? `Documento-${fileId ?? objectId}`),
-                        );
+                        const extractedTitle = fileItem.title ?? fileItem.name ?? fileItem.file_upload_name;
+                        const title = sanitizeFileName(String(extractedTitle ?? `Documento-${fileId ?? objectId}`));
+
                         const downloadUrl =
                             typeof fileItem.download_url === 'string' && fileItem.download_url
                                 ? ensureAbsoluteUrl(fileItem.download_url)
@@ -298,60 +309,6 @@ async function resolveDocumentFiles(
                 }
             }
 
-            const downloadRegex = /\/dotlrn\/file-storage\/download\/[^\s"'<>]+/g;
-            const idRegex = /(?:file_id|object_id)=([0-9]+)/g;
-            const downloadUrlRegex = /download_url"\s*:\s*"([^"]+)"/g;
-            const dataDownloadUrlRegex = /data-download-url\s*=\s*"([^"]+)"/g;
-
-            for (const match of html.match(downloadRegex) ?? []) {
-                const normalized = ensureAbsoluteUrl(match);
-                const guessedName = guessFileNameFromUrl(normalized) ?? 'documento';
-                pushUniqueFile(files, dedupe, {
-                    file_name: sanitizeFileName(guessedName),
-                    download_url: normalized,
-                    source_url: docLink,
-                    mime_type: inferMimeType(guessedName, normalized),
-                });
-            }
-
-            let urlMatch: RegExpExecArray | null;
-            while ((urlMatch = downloadUrlRegex.exec(html)) !== null) {
-                const raw = unescapeJsonUrl(urlMatch[1]);
-                const normalized = ensureAbsoluteUrl(raw);
-                const guessedName = guessFileNameFromUrl(normalized) ?? 'documento';
-                pushUniqueFile(files, dedupe, {
-                    file_name: sanitizeFileName(guessedName),
-                    download_url: normalized,
-                    source_url: docLink,
-                    mime_type: inferMimeType(guessedName, normalized),
-                });
-            }
-
-            while ((urlMatch = dataDownloadUrlRegex.exec(html)) !== null) {
-                const raw = unescapeJsonUrl(urlMatch[1]);
-                const normalized = ensureAbsoluteUrl(raw);
-                const guessedName = guessFileNameFromUrl(normalized) ?? 'documento';
-                pushUniqueFile(files, dedupe, {
-                    file_name: sanitizeFileName(guessedName),
-                    download_url: normalized,
-                    source_url: docLink,
-                    mime_type: inferMimeType(guessedName, normalized),
-                });
-            }
-
-            let match: RegExpExecArray | null;
-            while ((match = idRegex.exec(html)) !== null) {
-                const id = match[1];
-                const field = match[0].startsWith('object_id=') ? 'object_id' : 'file_id';
-                const downloadUrl = `https://tecdigital.tec.ac.cr/dotlrn/file-storage/download/documento?${field}=${id}`;
-                const fileName = `Documento-${id}`;
-                pushUniqueFile(files, dedupe, {
-                    file_name: fileName,
-                    download_url: downloadUrl,
-                    source_url: docLink,
-                    mime_type: inferMimeType(fileName, downloadUrl),
-                });
-            }
         }
 
         extractorLogger.info({ source: docLink, count: files.length }, 'Resolved document files');
