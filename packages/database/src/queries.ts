@@ -201,6 +201,34 @@ export async function updateUser(
   return res.rows[0].id;
 }
 
+export async function updateUserCredentials(
+  chatId: string,
+  tec_username: string,
+  tec_password_enc: string,
+): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE users
+     SET tec_username = $2,
+         tec_password_enc = $3
+     WHERE telegram_chat_id = $1`,
+    [chatId, tec_username, tec_password_enc],
+  );
+}
+
+export async function updateUserDriveFolder(
+  chatId: string,
+  drive_root_folder_id: string | null,
+): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE users
+     SET drive_root_folder_id = $2
+     WHERE telegram_chat_id = $1`,
+    [chatId, drive_root_folder_id],
+  );
+}
+
 // ─── Pending Bot Registration Queries ────────────────────────────────────────
 
 export type RegistrationStep =
@@ -208,7 +236,10 @@ export type RegistrationStep =
   | 'awaiting_password'
   | 'awaiting_drive_folder'
   | 'awaiting_confirmation'
-  | 'done';
+  | 'done'
+  | 'update_awaiting_username'
+  | 'update_awaiting_password'
+  | 'update_awaiting_drive';
 
 export interface PendingRegistration {
   id: string;
@@ -244,6 +275,24 @@ export async function upsertPendingRegistration(chatId: string): Promise<void> {
            drive_folder_id  = NULL,
            updated_at       = NOW()`,
     [chatId],
+  );
+}
+
+export async function upsertPendingRegistrationWithStep(
+  chatId: string,
+  step: RegistrationStep,
+): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO pending_registrations (chat_id, step, tec_username, tec_password_enc, drive_folder_id, updated_at)
+     VALUES ($1, $2, NULL, NULL, NULL, NOW())
+     ON CONFLICT (chat_id) DO UPDATE
+       SET step             = $2,
+           tec_username     = NULL,
+           tec_password_enc = NULL,
+           drive_folder_id  = NULL,
+           updated_at       = NOW()`,
+    [chatId, step],
   );
 }
 
