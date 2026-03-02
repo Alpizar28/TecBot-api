@@ -3,7 +3,7 @@
 
 set -e  # Exit immediately on any error
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_FILE="$ROOT_DIR/infra/docker-compose.yml"
+COMPOSE_FILE="$ROOT_DIR/docker-compose.yml"
 
 echo "=================================================="
 echo " TEC Brain Monorepo — Deploy Script"

@@ -28,7 +28,7 @@ services:
 
   scraper:
     build:
-      context: ..
+      context: .
       dockerfile: apps/scraper/Dockerfile
     restart: unless-stopped
     deploy:
@@ -37,7 +37,6 @@ services:
           memory: 300M
         reservations:
           memory: 100M
-    env_file: ../.env
     environment:
       PORT: '3001'
     ports:
@@ -59,7 +58,7 @@ services:
 
   core:
     build:
-      context: ..
+      context: .
       dockerfile: apps/core/Dockerfile
     restart: unless-stopped
     deploy:
@@ -68,7 +67,6 @@ services:
           memory: 400M
         reservations:
           memory: 100M
-    env_file: ../.env
     environment:
       PORT: '3002'
       SCRAPER_URL: 'http://scraper:3001'
@@ -77,7 +75,7 @@ services:
     ports:
       - '${CORE_PORT:-3002}:3002'
     volumes:
-      - ../data/credentials:/app/data/credentials:ro
+      - credentials_data:/app/data/credentials:ro
     depends_on:
       db:
         condition: service_healthy
@@ -99,3 +97,4 @@ services:
 volumes:
   postgres_data:
   sessions_data:
+  credentials_data:
