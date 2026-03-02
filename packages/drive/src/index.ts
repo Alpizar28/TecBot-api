@@ -19,6 +19,8 @@ const HTTP_RETRY_BASE_MS = parseInt(process.env.HTTP_RETRY_BASE_MS ?? '400', 10)
 
 /**
  * Loads the OAuth2 client config from the JSON file created in Google Cloud Console.
+ * If the environment variable OAUTH_REDIRECT_URI is set, it overrides the redirect_uri
+ * from the credentials file — useful when the server runs on a remote host.
  */
 export function loadOAuthClientConfig(oauthClientPath: string): OAuthClient {
   if (!existsSync(oauthClientPath)) {
@@ -30,7 +32,7 @@ export function loadOAuthClientConfig(oauthClientPath: string): OAuthClient {
   return {
     clientId: cfg.client_id,
     clientSecret: cfg.client_secret,
-    redirectUri: cfg.redirect_uris[0],
+    redirectUri: process.env.OAUTH_REDIRECT_URI ?? cfg.redirect_uris[0],
   };
 }
 
