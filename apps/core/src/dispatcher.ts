@@ -6,6 +6,8 @@ import {
   updateNotificationDocumentStatus,
   uploadedFileExists,
   insertUploadedFile,
+  upsertCourseMapping,
+  getCourseMapping,
 } from '@tec-brain/database';
 import { TelegramService } from '@tec-brain/telegram';
 import { DriveService } from '@tec-brain/drive';
@@ -20,6 +22,37 @@ interface LoggerLike {
 export interface DispatchResult {
   processed: boolean;
   reason: string;
+}
+
+/** Regex to detect a bare course code like "FI2207" */
+const COURSE_CODE_RE = /^[A-Z]{2,4}\d{3,4}$/i;
+
+/**
+ * Resolves the best available course name for folder creation:
+ * - If `course` is already a full name, save the code→name pair (if we also
+ *   know the code from the link) and return the full name.
+ * - If `course` is only a short code, try the DB cache; return cached name or
+ *   fall back to the code itself.
+ */
+async function resolveCourseNameForDrive(course: string, link?: string): Promise<string> {
+  const isCode = COURSE_CODE_RE.test(course.trim());
+
+  if (!isCode) {
+    // We have a full name — try to learn the code from the URL and persist it.
+    if (link) {
+      const codeMatch = link.match(/\/dotlrn\/classes\/(?:[^/]+\/)?([A-Z]{2,4}\d{3,4})(?:\/|$)/i);
+      if (codeMatch?.[1]) {
+        await upsertCourseMapping(codeMatch[1], course).catch(() => {
+          /* non-critical — never fail dispatch because of this */
+        });
+      }
+    }
+    return course;
+  }
+
+  // We only have a code — check the global cache.
+  const cached = await getCourseMapping(course).catch(() => null);
+  return cached ?? course;
 }
 
 export async function dispatch(
@@ -145,8 +178,9 @@ async function handleDocumentNotification(
   log: LoggerLike,
 ): Promise<boolean> {
   if (drive && user.drive_root_folder_id && notification.files && notification.files.length > 0) {
+    const resolvedCourse = await resolveCourseNameForDrive(notification.course, notification.link);
     const userFolderId = await drive.ensureFolder(user.name, user.drive_root_folder_id);
-    const courseFolderId = await drive.ensureFolder(notification.course, userFolderId);
+    const courseFolderId = await drive.ensureFolder(resolvedCourse, userFolderId);
 
     const results = await Promise.all(
       notification.files.map(async (file) => {
@@ -189,7 +223,7 @@ async function handleDocumentNotification(
             courseFolderId,
           );
 
-          await insertUploadedFile(user.id, notification.course, fileHash, file.file_name, fileId);
+          await insertUploadedFile(user.id, resolvedCourse, fileHash, file.file_name, fileId);
           const notified = await safeTelegram(
             user,
             notification,
@@ -214,13 +248,7 @@ async function handleDocumentNotification(
               .createHash('sha256')
               .update(file.download_url + file.file_name)
               .digest('hex');
-            await insertUploadedFile(
-              user.id,
-              notification.course,
-              fileHash,
-              file.file_name,
-              'fallback',
-            );
+            await insertUploadedFile(user.id, resolvedCourse, fileHash, file.file_name, 'fallback');
             log.info(
               { fileName: file.file_name },
               'Marked document as fallback-sent to prevent duplicate retries',

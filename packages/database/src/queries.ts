@@ -380,4 +380,37 @@ export async function consumeOAuthState(nonce: string): Promise<string | null> {
   return res.rows[0]?.user_id ?? null;
 }
 
+// ─── Course Mappings ─────────────────────────────────────────────────────────
+
+/**
+ * Inserts or updates a global course code → full name mapping.
+ * Code is stored in uppercase. If the mapping already exists, the name
+ * is only updated when the new name is longer (richer information wins).
+ */
+export async function upsertCourseMapping(code: string, name: string): Promise<void> {
+  const pool = getPool();
+  const upper = code.toUpperCase();
+  await pool.query(
+    `INSERT INTO course_mappings (code, name, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (code) DO UPDATE
+       SET name       = CASE WHEN length($2) > length(course_mappings.name) THEN $2 ELSE course_mappings.name END,
+           updated_at = NOW()`,
+    [upper, name],
+  );
+}
+
+/**
+ * Returns the stored full name for a course code, or null if unknown.
+ */
+export async function getCourseMapping(code: string): Promise<string | null> {
+  const pool = getPool();
+  const upper = code.toUpperCase();
+  const res = await pool.query<{ name: string }>(
+    'SELECT name FROM course_mappings WHERE code = $1',
+    [upper],
+  );
+  return res.rows[0]?.name ?? null;
+}
+
 export type { pg };

@@ -18,6 +18,8 @@ export {
   saveDriveOAuthToken,
   createOAuthState,
   consumeOAuthState,
+  upsertCourseMapping,
+  getCourseMapping,
   getPendingRegistration,
   upsertPendingRegistration,
   upsertPendingRegistrationWithStep,
