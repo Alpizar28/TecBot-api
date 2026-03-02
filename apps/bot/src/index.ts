@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { Bot, session, type SessionFlavor, type Context } from 'grammy';
+import { Menu } from '@grammyjs/menu';
 import { pino } from 'pino';
 import {
   getPool,
@@ -85,6 +86,132 @@ function buildDriveAuthUrl(userId: string): string {
   const base = getAuthorizationUrl(oauthClient);
   return `${base}&state=${encodeURIComponent(state)}`;
 }
+
+// ─── Menus ────────────────────────────────────────────────────────────────────
+
+// Confirmation Menu
+const confirmMenu = new Menu<BotContext>('confirm-menu')
+  .text('✅ Sí, completar registro', async (ctx) => {
+    const chatId = String(ctx.chat?.id);
+    const pending = await getPendingRegistration(chatId);
+
+    if (!pending || pending.step !== 'awaiting_confirmation') {
+      await ctx.reply('La sesión ha expirado o ya se completó.');
+      return;
+    }
+
+    if (!pending.tec_username || !pending.tec_password_enc) {
+      await ctx.reply('❌ Faltan datos. Envía /start para comenzar de nuevo.');
+      await deletePendingRegistration(chatId);
+      return;
+    }
+
+    // Derive a display name from the email (e.g. "juan.perez.1@estudiantec.cr" → "Juan Perez")
+    const namePart = pending.tec_username.split('@')[0];
+    const displayName = namePart
+      .split('.')
+      .filter((p: string) => !/^\d+$/.test(p)) // strip trailing numbers
+      .map((p: string) => p.charAt(0).toUpperCase() + p.slice(1))
+      .join(' ');
+
+    let userId: string;
+    try {
+      userId = await createUser({
+        name: displayName,
+        tec_username: pending.tec_username,
+        tec_password_enc: pending.tec_password_enc,
+        telegram_chat_id: chatId,
+        drive_root_folder_id: pending.drive_folder_id ?? null,
+      });
+    } catch (err) {
+      logger.error({ err, chatId }, 'Failed to create user during registration');
+      await ctx.editMessageText(
+        '❌ Hubo un error al guardar tu cuenta. Por favor intenta de nuevo más tarde o contacta al administrador.',
+      );
+      return;
+    }
+
+    await deletePendingRegistration(chatId);
+
+    logger.info({ chatId, userId, username: pending.tec_username }, 'New user registered via bot');
+
+    // ── Drive OAuth ─────────────────────────────────────────────────────────────
+    if (pending.drive_folder_id && oauthClient) {
+      let driveUrl: string;
+      try {
+        driveUrl = buildDriveAuthUrl(userId);
+      } catch (err) {
+        logger.warn({ err, userId }, 'Could not build Drive auth URL');
+        await ctx.editMessageText(
+          `🎉 <b>¡Registro completado!</b>\n\n` +
+            `Ya estás configurado y comenzarás a recibir notificaciones de TEC Digital en los próximos minutos.\n\n` +
+            `⚠️ No se pudo generar el link de Google Drive. Contacta al administrador para activarlo.`,
+          { parse_mode: 'HTML' },
+        );
+        return;
+      }
+
+      await ctx.editMessageText(
+        `🎉 <b>¡Registro completado!</b>\n\n` +
+          `✅ Ya estás en el sistema.\n\n` +
+          `─────────────────────\n` +
+          `📁 <b>Último paso — Autorizar Google Drive</b>\n\n` +
+          `Para que el bot pueda subir tus archivos a Drive, necesitas autorizarlo una sola vez:\n\n` +
+          `👉 <a href="${driveUrl}">Toca aquí para autorizar Google Drive</a>\n\n` +
+          `<i>Se abrirá una página de Google. Selecciona tu cuenta y acepta los permisos.</i>\n\n` +
+          `Si no quieres Drive ahora, puedes ignorar este paso. Recibirás los archivos igualmente con enlaces directos.`,
+        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
+      );
+    } else {
+      await ctx.editMessageText(
+        `🎉 <b>¡Registro completado, ${displayName}!</b>\n\n` +
+          `✅ En los próximos minutos comenzarás a recibir tus notificaciones de TEC Digital aquí en Telegram.\n\n` +
+          `─────────────────────\n` +
+          `<b>Comandos disponibles:</b>\n` +
+          `/estado — Ver el estado de tu cuenta\n` +
+          `/cancelar — Reiniciar el registro`,
+        { parse_mode: 'HTML' },
+      );
+    }
+  })
+  .row()
+  .text('❌ No, cancelar y volver a empezar', async (ctx) => {
+    const chatId = String(ctx.chat?.id);
+    await upsertPendingRegistration(chatId);
+    await ctx.editMessageText('🔄 Registro cancelado.');
+    await ctx.reply(
+      'Empecemos de nuevo.\n\n' +
+        '📧 <b>Paso 1 de 3</b>\n' +
+        '¿Cuál es tu correo institucional del TEC?',
+      { parse_mode: 'HTML' },
+    );
+  });
+
+// Drive Skip Menu
+const skipDriveMenu = new Menu<BotContext>('skip-drive-menu').text(
+  '⏭️ Omitir (No usar Google Drive)',
+  async (ctx) => {
+    const chatId = String(ctx.chat?.id);
+    await advancePendingRegistration(chatId, 'awaiting_confirmation', {
+      drive_folder_id: null,
+    });
+
+    const reg = await getPendingRegistration(chatId);
+
+    await ctx.editMessageText(
+      `📋 <b>Resumen de tu registro</b>\n\n` +
+        `📧 <b>Correo TEC:</b> <code>${reg?.tec_username ?? '?'}</code>\n` +
+        `🔑 <b>Contraseña:</b> <code>••••••••</code> (cifrada)\n` +
+        `📁 <b>Carpeta Drive:</b> ❌ Sin Drive (solo Telegram)\n\n` +
+        `─────────────────────\n` +
+        `¿Todo está bien?`,
+      { parse_mode: 'HTML', reply_markup: confirmMenu },
+    );
+  },
+);
+
+bot.use(confirmMenu);
+bot.use(skipDriveMenu);
 
 // ─── /start ───────────────────────────────────────────────────────────────────
 
@@ -256,13 +383,13 @@ bot.on('message:text', async (ctx) => {
         `─────────────────────\n` +
         `📁 <b>Paso 3 de 3</b>\n` +
         `¿Quieres que el bot suba tus archivos y documentos a <b>Google Drive</b>?\n\n` +
-        `Si sí:\n` +
+        `Si <b>sí</b>:\n` +
         `1. Abre Google Drive y crea una carpeta (ej: <i>"Universidad"</i>).\n` +
         `2. Entra a esa carpeta y copia el <b>ID</b> que aparece en la URL:\n` +
         `   <code>drive.google.com/drive/folders/<b>ESTE_ES_EL_ID</b></code>\n` +
-        `3. Pégalo aquí.\n\n` +
-        `Si <b>no</b> quieres usar Drive, escribe: <code>no</code>`,
-      { parse_mode: 'HTML' },
+        `3. Pégalo aquí en el chat.\n\n` +
+        `Si <b>no</b> quieres usar Drive, presiona el botón de abajo:`,
+      { parse_mode: 'HTML', reply_markup: skipDriveMenu },
     );
     return;
   }
@@ -278,8 +405,8 @@ bot.on('message:text', async (ctx) => {
           '⚠️ No pude identificar un ID de carpeta de Google Drive en lo que enviaste.\n\n' +
             '• Copia el ID directamente de la URL de Drive:\n' +
             '  <code>drive.google.com/drive/folders/<b>1AbcXyz...</b></code>\n\n' +
-            '• O escribe <code>no</code> para omitir Drive.',
-          { parse_mode: 'HTML' },
+            '• O presiona el botón para omitir Drive.',
+          { parse_mode: 'HTML', reply_markup: skipDriveMenu },
         );
         return;
       }
@@ -299,110 +426,17 @@ bot.on('message:text', async (ctx) => {
         `🔑 <b>Contraseña:</b> <code>••••••••</code> (cifrada)\n` +
         `📁 <b>Carpeta Drive:</b> ${driveText}\n\n` +
         `─────────────────────\n` +
-        `¿Todo está bien? Responde:\n` +
-        `• <b>sí</b> — para completar el registro\n` +
-        `• <b>no</b> — para cancelar y volver a empezar`,
-      { parse_mode: 'HTML' },
+        `¿Todo está bien?`,
+      { parse_mode: 'HTML', reply_markup: confirmMenu },
     );
     return;
   }
 
-  // ── Step 4: Confirmation ────────────────────────────────────────────────────
+  // ── Step 4: Confirmation (fallback if typed) ────────────────────────────────
   if (pending.step === 'awaiting_confirmation') {
-    const answer = text.toLowerCase().replace(/[^a-záéíóún]/gi, '');
-
-    if (answer === 'no') {
-      await upsertPendingRegistration(chatId);
-      await ctx.reply(
-        '🔄 Registro cancelado. Empecemos de nuevo.\n\n' +
-          '📧 <b>Paso 1 de 3</b>\n' +
-          '¿Cuál es tu correo institucional del TEC?',
-        { parse_mode: 'HTML' },
-      );
-      return;
-    }
-
-    if (answer !== 'si' && answer !== 'sí') {
-      await ctx.reply('¿Confirmas el registro? Responde <b>sí</b> o <b>no</b>.', {
-        parse_mode: 'HTML',
-      });
-      return;
-    }
-
-    // ── Create the user ────────────────────────────────────────────────────────
-    if (!pending.tec_username || !pending.tec_password_enc) {
-      await ctx.reply('❌ Faltan datos. Envía /start para comenzar de nuevo.');
-      await deletePendingRegistration(chatId);
-      return;
-    }
-
-    // Derive a display name from the email (e.g. "juan.perez.1@estudiantec.cr" → "Juan Perez")
-    const namePart = pending.tec_username.split('@')[0];
-    const displayName = namePart
-      .split('.')
-      .filter((p: string) => !/^\d+$/.test(p)) // strip trailing numbers
-      .map((p: string) => p.charAt(0).toUpperCase() + p.slice(1))
-      .join(' ');
-
-    let userId: string;
-    try {
-      userId = await createUser({
-        name: displayName,
-        tec_username: pending.tec_username,
-        tec_password_enc: pending.tec_password_enc,
-        telegram_chat_id: chatId,
-        drive_root_folder_id: pending.drive_folder_id ?? null,
-      });
-    } catch (err) {
-      logger.error({ err, chatId }, 'Failed to create user during registration');
-      await ctx.reply(
-        '❌ Hubo un error al guardar tu cuenta. Por favor intenta de nuevo más tarde o contacta al administrador.',
-      );
-      return;
-    }
-
-    await deletePendingRegistration(chatId);
-
-    logger.info({ chatId, userId, username: pending.tec_username }, 'New user registered via bot');
-
-    // ── Drive OAuth ─────────────────────────────────────────────────────────────
-    if (pending.drive_folder_id && oauthClient) {
-      let driveUrl: string;
-      try {
-        driveUrl = buildDriveAuthUrl(userId);
-      } catch (err) {
-        logger.warn({ err, userId }, 'Could not build Drive auth URL');
-        await ctx.reply(
-          `🎉 <b>¡Registro completado!</b>\n\n` +
-            `Ya estás configurado y comenzarás a recibir notificaciones de TEC Digital en los próximos minutos.\n\n` +
-            `⚠️ No se pudo generar el link de Google Drive. Contacta al administrador para activarlo.`,
-          { parse_mode: 'HTML' },
-        );
-        return;
-      }
-
-      await ctx.reply(
-        `🎉 <b>¡Registro completado!</b>\n\n` +
-          `✅ Ya estás en el sistema.\n\n` +
-          `─────────────────────\n` +
-          `📁 <b>Último paso — Autorizar Google Drive</b>\n\n` +
-          `Para que el bot pueda subir tus archivos a Drive, necesitas autorizarlo una sola vez:\n\n` +
-          `👉 <a href="${driveUrl}">Toca aquí para autorizar Google Drive</a>\n\n` +
-          `<i>Se abrirá una página de Google. Selecciona tu cuenta y acepta los permisos.</i>\n\n` +
-          `Si no quieres Drive ahora, puedes ignorar este paso. Recibirás los archivos igualmente con enlaces directos.`,
-        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
-      );
-    } else {
-      await ctx.reply(
-        `🎉 <b>¡Registro completado, ${displayName}!</b>\n\n` +
-          `✅ En los próximos minutos comenzarás a recibir tus notificaciones de TEC Digital aquí en Telegram.\n\n` +
-          `─────────────────────\n` +
-          `<b>Comandos disponibles:</b>\n` +
-          `/estado — Ver el estado de tu cuenta\n` +
-          `/cancelar — Reiniciar el registro`,
-        { parse_mode: 'HTML' },
-      );
-    }
+    await ctx.reply('Por favor, usa los botones de arriba para confirmar o cancelar el registro.', {
+      reply_markup: confirmMenu,
+    });
     return;
   }
 });
