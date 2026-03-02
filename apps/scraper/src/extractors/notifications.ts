@@ -201,8 +201,19 @@ async function normalizeNotification(
   const text = (item.text ?? '').trim();
   const link = item.url ?? '';
   const type = classifyType(item.type_hint ?? '', text, link);
-  // Prefer the course name from TEC's own `title` field; fall back to text parsing
-  const course = item.title ? item.title.trim() : extractCourse(text, link);
+  // Try to extract a better name from text if available
+  const extractedCourse = extractCourse(text, link);
+
+  let course = item.title ? item.title.trim() : extractedCourse;
+
+  // If TEC returned just a short code for the title, but our heuristic extracted a full name, prefer the full name.
+  if (
+    course.match(/^[A-Z]{2,4}\d{3,4}$/i) &&
+    extractedCourse !== 'Curso Desconocido' &&
+    !extractedCourse.match(/^[A-Z]{2,4}\d{3,4}$/i)
+  ) {
+    course = extractedCourse;
+  }
   // Prefer `notification_id`; fall back to legacy `id`
   const tecId = item.notification_id ?? item.id;
   // Parse TEC date format "DD-MM-YYYY HH:MMam/pm" → "YYYY-MM-DD"
@@ -623,30 +634,46 @@ export function classifyType(
 export function extractCourse(text: string, link?: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
 
-  // Try to extract course code from URL first — most reliable source.
-  // TEC Digital URL pattern: /dotlrn/classes/{dept}/{COURSECODE}/{section}/...
-  if (link) {
-    const urlCourseCode = link.match(/\/dotlrn\/classes\/[^/]+\/([A-Z]{2,4}\d{3,4})\//i);
-    if (urlCourseCode?.[1]) return urlCourseCode[1].toUpperCase();
+  // 1. If no text, we have no choice but to fallback to URL code
+  if (!normalized) {
+    if (link) {
+      const urlCourseCode = link.match(
+        /\/dotlrn\/classes\/(?:[^/]+\/)?([A-Z]{2,4}\d{3,4})(?:\/|$)/i,
+      );
+      if (urlCourseCode?.[1]) return urlCourseCode[1].toUpperCase();
+    }
+    return 'Curso Desconocido';
   }
 
-  if (!normalized) return 'Curso Desconocido';
-
+  // 2. Try to extract explicit label
   const labeled = normalized.match(/(?:curso|course)\s*:\s*([^|]{4,80})/i);
   if (labeled?.[1]) return cleanCourseCandidate(labeled[1]);
 
+  // 3. Try to extract name before a common separator
   const separators = [' - ', ' – ', ': ', ' | '];
   for (const separator of separators) {
     const idx = normalized.indexOf(separator);
     if (idx > 0) {
       const candidate = cleanCourseCandidate(normalized.slice(0, idx));
-      if (candidate.length >= 4) return candidate;
+      // Only accept if it's longer than 4 chars AND not just a code
+      if (candidate.length >= 4 && !/^[A-Z]{2,4}\d{3,4}$/.test(candidate)) {
+        return candidate;
+      }
     }
   }
 
+  // 4. At this point, try to get the code from URL as a fallback,
+  // since the text might be too dirty or just a description
+  if (link) {
+    const urlCourseCode = link.match(/\/dotlrn\/classes\/(?:[^/]+\/)?([A-Z]{2,4}\d{3,4})(?:\/|$)/i);
+    if (urlCourseCode?.[1]) return urlCourseCode[1].toUpperCase();
+  }
+
+  // 5. Try to extract a code directly from text
   const courseCode = normalized.match(/\b([A-Z]{2,4}\d{3,4})\b/);
   if (courseCode?.[1]) return courseCode[1];
 
+  // 6. Complete fallback to first 80 chars
   return cleanCourseCandidate(normalized.slice(0, 80));
 }
 
