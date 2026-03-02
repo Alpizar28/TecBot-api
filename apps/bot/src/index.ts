@@ -7,6 +7,7 @@ import {
   runMigrations,
   encrypt,
   createUser,
+  updateUser,
   getPendingRegistration,
   upsertPendingRegistration,
   advancePendingRegistration,
@@ -14,6 +15,7 @@ import {
   getUserById,
   getUserByTelegramChatId,
   getUserByTecUsername,
+  createOAuthState,
   type RegistrationStep,
 } from '@tec-brain/database';
 import { loadOAuthClientConfig, getAuthorizationUrl, type OAuthClient } from '@tec-brain/drive';
@@ -80,9 +82,9 @@ function isTecEmail(value: string): boolean {
 }
 
 /** Builds the Google Drive auth URL for a user and returns it. */
-function buildDriveAuthUrl(userId: string): string {
+async function buildDriveAuthUrl(userId: string): Promise<string> {
   if (!oauthClient) throw new Error('OAuth client not configured');
-  const state = Buffer.from(JSON.stringify({ userId })).toString('base64url');
+  const state = await createOAuthState(userId);
   const base = getAuthorizationUrl(oauthClient);
   return `${base}&state=${encodeURIComponent(state)}`;
 }
@@ -116,30 +118,44 @@ const confirmMenu = new Menu<BotContext>('confirm-menu')
 
     let userId: string;
     try {
-      userId = await createUser({
-        name: displayName,
-        tec_username: pending.tec_username,
-        tec_password_enc: pending.tec_password_enc,
-        telegram_chat_id: chatId,
-        drive_root_folder_id: pending.drive_folder_id ?? null,
-      });
+      const existingUser = await getUserByTelegramChatId(chatId);
+      if (existingUser) {
+        // User is updating their info via /actualizar
+        userId = await updateUser(chatId, {
+          tec_username: pending.tec_username,
+          tec_password_enc: pending.tec_password_enc,
+          drive_root_folder_id: pending.drive_folder_id ?? null,
+        });
+      } else {
+        // Brand new user
+        userId = await createUser({
+          name: displayName,
+          tec_username: pending.tec_username,
+          tec_password_enc: pending.tec_password_enc,
+          telegram_chat_id: chatId,
+          drive_root_folder_id: pending.drive_folder_id ?? null,
+        });
+      }
     } catch (err) {
-      logger.error({ err, chatId }, 'Failed to create user during registration');
+      logger.error({ err, chatId }, 'Failed to save user during registration');
       await ctx.editMessageText(
-        '❌ Hubo un error al guardar tu cuenta. Por favor intenta de nuevo más tarde o contacta al administrador.',
+        '❌ Hubo un error al guardar tu cuenta. Si el correo ya estaba registrado, asegúrate de usar /actualizar. De lo contrario, intenta de nuevo.',
       );
       return;
     }
 
     await deletePendingRegistration(chatId);
 
-    logger.info({ chatId, userId, username: pending.tec_username }, 'New user registered via bot');
+    logger.info(
+      { chatId, userId, username: pending.tec_username },
+      'User registered/updated via bot',
+    );
 
     // ── Drive OAuth ─────────────────────────────────────────────────────────────
     if (pending.drive_folder_id && oauthClient) {
       let driveUrl: string;
       try {
-        driveUrl = buildDriveAuthUrl(userId);
+        driveUrl = await buildDriveAuthUrl(userId);
       } catch (err) {
         logger.warn({ err, userId }, 'Could not build Drive auth URL');
         await ctx.editMessageText(
@@ -444,7 +460,15 @@ bot.on('message:text', async (ctx) => {
 // ─── Error handler ────────────────────────────────────────────────────────────
 
 bot.catch((err) => {
-  logger.error({ err: err.error, update: err.ctx.update }, 'Bot error');
+  const ctx = err.ctx;
+  const update = { ...ctx.update } as any;
+
+  // Prevent logging passwords in plaintext
+  if (update.message?.text) {
+    update.message.text = '[REDACTED_FOR_SECURITY]';
+  }
+
+  logger.error({ err: err.error, update }, 'Bot error');
 });
 
 // ─── Startup ──────────────────────────────────────────────────────────────────

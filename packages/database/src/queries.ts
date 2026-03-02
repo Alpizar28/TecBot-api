@@ -164,11 +164,6 @@ export async function createUser(params: {
   const res = await pool.query<{ id: string }>(
     `INSERT INTO users (name, tec_username, tec_password_enc, telegram_chat_id, drive_root_folder_id, is_active)
      VALUES ($1, $2, $3, $4, $5, TRUE)
-     ON CONFLICT (tec_username) DO UPDATE
-       SET tec_password_enc     = EXCLUDED.tec_password_enc,
-           telegram_chat_id     = EXCLUDED.telegram_chat_id,
-           drive_root_folder_id = EXCLUDED.drive_root_folder_id,
-           is_active            = TRUE
      RETURNING id`,
     [
       params.name,
@@ -178,6 +173,31 @@ export async function createUser(params: {
       params.drive_root_folder_id,
     ],
   );
+  return res.rows[0].id;
+}
+
+export async function updateUser(
+  chatId: string,
+  params: {
+    tec_username: string;
+    tec_password_enc: string;
+    drive_root_folder_id: string | null;
+  },
+): Promise<string> {
+  const pool = getPool();
+  const res = await pool.query<{ id: string }>(
+    `UPDATE users
+     SET tec_username = $2,
+         tec_password_enc = $3,
+         drive_root_folder_id = $4,
+         is_active = TRUE
+     WHERE telegram_chat_id = $1
+     RETURNING id`,
+    [chatId, params.tec_username, params.tec_password_enc, params.drive_root_folder_id],
+  );
+  if (res.rows.length === 0) {
+    throw new Error('User not found or chat ID mismatch');
+  }
   return res.rows[0].id;
 }
 
@@ -285,6 +305,30 @@ export async function saveDriveOAuthToken(userId: string, encryptedToken: string
     userId,
     encryptedToken,
   ]);
+}
+
+/**
+ * Creates an OAuth state nonce for CSRF protection.
+ */
+export async function createOAuthState(userId: string): Promise<string> {
+  const pool = getPool();
+  const res = await pool.query<{ state_nonce: string }>(
+    'INSERT INTO oauth_states (user_id) VALUES ($1) RETURNING state_nonce',
+    [userId],
+  );
+  return res.rows[0].state_nonce;
+}
+
+/**
+ * Consumes an OAuth state nonce, returning the associated userId if valid.
+ */
+export async function consumeOAuthState(nonce: string): Promise<string | null> {
+  const pool = getPool();
+  const res = await pool.query<{ user_id: string }>(
+    'DELETE FROM oauth_states WHERE state_nonce = $1 RETURNING user_id',
+    [nonce],
+  );
+  return res.rows[0]?.user_id ?? null;
 }
 
 export type { pg };

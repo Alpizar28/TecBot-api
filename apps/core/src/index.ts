@@ -1,7 +1,14 @@
 import 'dotenv/config';
 import Fastify from 'fastify';
 import cron from 'node-cron';
-import { getPool, runMigrations, saveDriveOAuthToken, encrypt } from '@tec-brain/database';
+import {
+  getPool,
+  runMigrations,
+  saveDriveOAuthToken,
+  encrypt,
+  createOAuthState,
+  consumeOAuthState,
+} from '@tec-brain/database';
 import { runOrchestrationCycle, handleInternalDispatch } from './orchestrator.js';
 import {
   loadOAuthClientConfig,
@@ -74,8 +81,8 @@ async function main() {
     const { userId } = request.query;
     if (!userId) return reply.status(400).send({ error: 'Missing userId query param' });
 
-    // Encode userId in state so the callback knows which user to update
-    const state = Buffer.from(JSON.stringify({ userId })).toString('base64url');
+    // Generate secure state nonce for CSRF protection
+    const state = await createOAuthState(userId);
     const baseUrl = getAuthorizationUrl(oauthClient);
     const authUrl = `${baseUrl}&state=${encodeURIComponent(state)}`;
     return reply.redirect(authUrl);
@@ -93,12 +100,17 @@ async function main() {
       if (error) return reply.status(400).send({ error: `Google returned: ${error}` });
       if (!code || !state) return reply.status(400).send({ error: 'Missing code or state' });
 
-      let userId: string;
+      let userId: string | null;
       try {
-        const decoded = JSON.parse(Buffer.from(state, 'base64url').toString('utf8'));
-        userId = decoded.userId;
-      } catch {
-        return reply.status(400).send({ error: 'Invalid state param' });
+        userId = await consumeOAuthState(state);
+      } catch (err) {
+        return reply.status(500).send({ error: 'Database error validating state' });
+      }
+
+      if (!userId) {
+        return reply
+          .status(400)
+          .send({ error: 'Invalid or expired state param (CSRF protection)' });
       }
 
       try {
@@ -129,7 +141,7 @@ async function main() {
     }
     const { userId } = request.query;
     if (!userId) return reply.status(400).send({ error: 'Missing userId query param' });
-    const state = Buffer.from(JSON.stringify({ userId })).toString('base64url');
+    const state = await createOAuthState(userId);
     const baseUrl = getAuthorizationUrl(oauthClient);
     const authUrl = `${baseUrl}&state=${encodeURIComponent(state)}`;
     return { authUrl };
