@@ -189,15 +189,16 @@ export async function processNotificationsSequentially(
           continue;
         }
 
-        if (!item.id) {
+        const tecNotifId = item.notification_id ?? item.id;
+        if (!tecNotifId) {
           extractorLogger.warn(
             { userId, externalId: parsed.external_id },
-            'Missing TEC notification id',
+            'Missing TEC notification id — cannot delete from TEC',
           );
           continue;
         }
 
-        const delUrl = `https://tecdigital.tec.ac.cr/tda-notifications/ajax/notification_delete?notification_id=${item.id}`;
+        const delUrl = `https://tecdigital.tec.ac.cr/tda-notifications/ajax/notification_delete?notification_id=${tecNotifId}`;
         const delRes = await requestWithRetry(() => client.client.get(delUrl), {
           endpoint: 'tec.notification_delete',
           metrics,
