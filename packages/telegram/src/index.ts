@@ -18,7 +18,9 @@ function formatNotice(user: User, n: RawNotification): string {
     parts.push(escapeHtml(n.description));
   }
 
-  parts.push(`<a href="${n.link}">Ver en TEC Digital</a>`);
+  // Use direct item URL when available, otherwise fall back to the list page
+  const targetUrl = n.resolved_link ?? n.link;
+  parts.push(`<a href="${targetUrl}">Ver en TEC Digital</a>`);
   return parts.join('\n');
 }
 

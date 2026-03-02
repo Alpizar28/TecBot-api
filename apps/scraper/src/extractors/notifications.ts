@@ -1,14 +1,25 @@
 import axios from 'axios';
+import * as cheerio from 'cheerio';
 import type { RawNotification } from '@tec-brain/types';
 import { TecHttpClient } from '../clients/tec-http.client.js';
 import { logger } from '../logger.js';
 
 interface TecNotificationItem {
+  /** Real TEC notification ID — used for the delete endpoint */
+  notification_id?: string;
+  /** Legacy field name — kept for backward compat */
   id?: string;
   text?: string;
+  /** Course / community name as returned by TEC */
+  title?: string;
   type_hint?: string;
   url?: string;
+  /** TEC-formatted date string, e.g. "02-03-2026 08:53AM" */
+  creation_date?: string;
+  /** Legacy field name */
   date_text?: string;
+  state?: string;
+  category_id?: number;
 }
 
 interface InternalDispatchResponse {
@@ -229,12 +240,19 @@ async function normalizeNotification(
   const text = (item.text ?? '').trim();
   const link = item.url ?? '';
   const type = classifyType(item.type_hint ?? '', text, link);
-  const course = extractCourse(text, link);
+  // Prefer the course name from TEC's own `title` field; fall back to text parsing
+  const course = item.title ? item.title.trim() : extractCourse(text, link);
+  // Prefer `notification_id`; fall back to legacy `id`
+  const tecId = item.notification_id ?? item.id;
+  // Parse TEC date format "DD-MM-YYYY HH:MMam/pm" → "YYYY-MM-DD"
+  const date =
+    parseTecDate(item.creation_date) ?? item.date_text ?? new Date().toISOString().slice(0, 10);
 
   let files: NonNullable<RawNotification['files']> | undefined;
   let document_status: RawNotification['document_status'] | undefined;
   let resolvedTitle: string | undefined;
   let resolvedDescription: string | undefined;
+  let resolved_link: string | undefined;
 
   if (type === 'documento' && link) {
     const resolved = await resolveDocumentFiles(client, link);
@@ -245,20 +263,35 @@ async function normalizeNotification(
     if (newsContent) {
       resolvedTitle = newsContent.title;
       resolvedDescription = newsContent.body;
+      resolved_link = newsContent.itemUrl;
     }
   }
 
   return {
-    external_id: `notif_${hashString(`${link}|${text.slice(0, 120)}`)}`,
+    external_id: tecId ? `notif_${tecId}` : `notif_${hashString(`${link}|${text.slice(0, 120)}`)}`,
     type,
     course,
     title: resolvedTitle ?? (text.split(' - ')[0] || text.slice(0, 120) || 'Notificación TEC'),
     description: (resolvedDescription ?? text) || 'Sin descripción',
     link,
-    date: item.date_text || new Date().toISOString().slice(0, 10),
+    resolved_link,
+    date,
     files,
     document_status,
   };
+}
+
+/**
+ * Parses TEC Digital date strings like "02-03-2026 08:53AM" → "2026-03-02".
+ * Returns null if the format is unrecognised.
+ */
+function parseTecDate(raw?: string): string | null {
+  if (!raw) return null;
+  // Format: DD-MM-YYYY HH:MMam/pm
+  const match = raw.match(/^(\d{2})-(\d{2})-(\d{4})/);
+  if (!match) return null;
+  const [, dd, mm, yyyy] = match;
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 const GENERIC_NEWS_TEXTS = [
@@ -275,104 +308,82 @@ function isGenericNewsText(text: string): boolean {
 interface NewsContent {
   title: string;
   body: string;
+  /** Absolute URL to the specific news item page */
+  itemUrl: string;
 }
+
+// ─── In-memory news cache ─────────────────────────────────────────────────────
+// Key: news list URL (e.g. /dotlrn/classes/.../news/). TTL: 2 hours.
+interface NewsCacheEntry {
+  content: NewsContent;
+  expiresAt: number;
+}
+const NEWS_CACHE = new Map<string, NewsCacheEntry>();
+const NEWS_CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 async function resolveNewsContent(
   client: TecHttpClient,
   newsLink: string,
 ): Promise<NewsContent | null> {
+  // Check cache first
+  const cached = NEWS_CACHE.get(newsLink);
+  if (cached && cached.expiresAt > Date.now()) {
+    extractorLogger.debug({ source: newsLink }, 'News content served from cache');
+    return cached.content;
+  }
+
   try {
     const listUrl = ensureAbsoluteUrl(newsLink);
     extractorLogger.debug({ url: listUrl }, 'Fetching news list page');
 
-    const listRes = await client.client.get<string>(listUrl);
-    const listHtml = String(listRes.data ?? '');
+    const listRes = await client.client.get<string>(listUrl, { timeout: 15_000 });
+    const $list = cheerio.load(String(listRes.data ?? ''));
 
-    // Extract the first news item link from the list table.
-    // Pattern: <a href="item?item_id=XXXXXXX" ...>TITLE</a>
-    const itemLinkMatch = listHtml.match(/href="(item\?item_id=\d+)"/);
-    if (!itemLinkMatch?.[1]) {
+    // First <a href="item?item_id=..."> inside the list table
+    const itemHref = $list('table.list-table a[href*="item?item_id="]').first().attr('href');
+    if (!itemHref) {
       extractorLogger.debug({ url: listUrl }, 'No news item link found in list page');
       return null;
     }
 
-    // Build absolute URL for the news item — relative to the list URL's directory
     const baseUrl = listUrl.endsWith('/') ? listUrl : listUrl + '/';
-    const itemUrl = baseUrl + itemLinkMatch[1];
+    const itemUrl = baseUrl + itemHref;
     extractorLogger.debug({ itemUrl }, 'Fetching news item page');
 
-    const itemRes = await client.client.get<string>(itemUrl);
-    const itemHtml = String(itemRes.data ?? '');
+    const itemRes = await client.client.get<string>(itemUrl, { timeout: 15_000 });
+    const $item = cheerio.load(String(itemRes.data ?? ''));
 
-    const title = extractNewsTitle(itemHtml);
-    const body = extractNewsBody(itemHtml);
+    const title =
+      $item('.inner-wrapper h1').first().text().trim() || $item('h1').first().text().trim();
+    const body = htmlToPlainText($item('.newsBody').first().html() ?? '').trim();
 
     if (!title && !body) {
       extractorLogger.debug({ itemUrl }, 'Could not extract content from news item page');
       return null;
     }
 
+    const content: NewsContent = {
+      title: title || 'Noticia',
+      body: body || title || 'Sin contenido',
+      itemUrl,
+    };
+
     extractorLogger.info(
       { source: newsLink, title, bodyLength: body.length },
       'Resolved news content',
     );
 
-    return { title: title || 'Noticia', body: body || title || 'Sin contenido' };
+    // Store in cache
+    NEWS_CACHE.set(newsLink, { content, expiresAt: Date.now() + NEWS_CACHE_TTL_MS });
+
+    return content;
   } catch (error) {
-    extractorLogger.error({ source: newsLink, error }, 'Error resolving news content');
+    extractorLogger.warn(
+      { source: newsLink, error },
+      'Failed to resolve news content, using fallback',
+    );
     return null;
   }
-}
-
-function extractNewsTitle(html: string): string {
-  // The news item page has <h1>TITLE</h1> in the main content
-  const match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-  if (!match?.[1]) return '';
-  return stripHtmlTags(match[1]).trim();
-}
-
-function extractNewsBody(html: string): string {
-  // The news item page has <div class="newsBody">...</div>
-  // We use index-based extraction to handle nested divs correctly.
-  const startTag = /<div[^>]+class="newsBody"[^>]*>/i;
-  const startMatch = html.match(startTag);
-  if (!startMatch) return '';
-
-  const openIdx = html.indexOf(startMatch[0]);
-  if (openIdx === -1) return '';
-
-  const contentStart = openIdx + startMatch[0].length;
-
-  // Walk forward counting open/close div tags to find the matching </div>
-  let depth = 1;
-  let pos = contentStart;
-  while (pos < html.length && depth > 0) {
-    const nextOpen = html.indexOf('<div', pos);
-    const nextClose = html.indexOf('</div', pos);
-
-    if (nextClose === -1) break;
-
-    if (nextOpen !== -1 && nextOpen < nextClose) {
-      depth++;
-      pos = nextOpen + 4;
-    } else {
-      depth--;
-      if (depth === 0) {
-        const innerHtml = html.slice(contentStart, nextClose);
-        return htmlToPlainText(innerHtml).trim();
-      }
-      pos = nextClose + 6;
-    }
-  }
-
-  return '';
-}
-
-function stripHtmlTags(html: string): string {
-  return html
-    .replace(/<[^>]+>/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 function htmlToPlainText(html: string): string {
