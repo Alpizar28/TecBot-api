@@ -19,6 +19,18 @@ export async function getUserById(id: string): Promise<User | null> {
   return res.rows[0] ?? null;
 }
 
+export async function getUserByTelegramChatId(chatId: string): Promise<User | null> {
+  const pool = getPool();
+  const res = await pool.query<User>('SELECT * FROM users WHERE telegram_chat_id = $1', [chatId]);
+  return res.rows[0] ?? null;
+}
+
+export async function getUserByTecUsername(username: string): Promise<User | null> {
+  const pool = getPool();
+  const res = await pool.query<User>('SELECT * FROM users WHERE tec_username = $1', [username]);
+  return res.rows[0] ?? null;
+}
+
 // ─── Notification Queries ─────────────────────────────────────────────────────
 
 /**

@@ -11,6 +11,8 @@ import {
   advancePendingRegistration,
   deletePendingRegistration,
   getUserById,
+  getUserByTelegramChatId,
+  getUserByTecUsername,
   type RegistrationStep,
 } from '@tec-brain/database';
 import { loadOAuthClientConfig, getAuthorizationUrl, type OAuthClient } from '@tec-brain/drive';
@@ -88,6 +90,18 @@ function buildDriveAuthUrl(userId: string): string {
 
 bot.command('start', async (ctx) => {
   const chatId = String(ctx.chat.id);
+  const existingUser = await getUserByTelegramChatId(chatId);
+
+  if (existingUser) {
+    await ctx.reply(
+      `👋 ¡Hola de nuevo, <b>${existingUser.name}</b>!\n\n` +
+        `Veo que ya estás registrado en el sistema con el correo <code>${existingUser.tec_username}</code>.\n\n` +
+        `Si deseas actualizar tu contraseña o tu carpeta de Google Drive, envía el comando /actualizar.`,
+      { parse_mode: 'HTML' },
+    );
+    return;
+  }
+
   await upsertPendingRegistration(chatId);
 
   await ctx.reply(
@@ -101,6 +115,31 @@ bot.command('start', async (ctx) => {
     { parse_mode: 'HTML' },
   );
   logger.info({ chatId }, '/start — registration reset, awaiting_username');
+});
+
+// ─── /actualizar ──────────────────────────────────────────────────────────────
+
+bot.command('actualizar', async (ctx) => {
+  const chatId = String(ctx.chat.id);
+  const existingUser = await getUserByTelegramChatId(chatId);
+
+  if (!existingUser) {
+    await ctx.reply('❌ No tienes una cuenta registrada. Envía /start para comenzar.');
+    return;
+  }
+
+  await upsertPendingRegistration(chatId);
+
+  await ctx.reply(
+    `🔄 <b>Modo de actualización</b>\n\n` +
+      `Vamos a actualizar tus datos. Este proceso reemplazará tu configuración anterior (pero las notificaciones ya enviadas no se perderán).\n\n` +
+      `─────────────────────\n` +
+      `📧 <b>Paso 1 de 3</b>\n` +
+      `¿Cuál es tu correo institucional del TEC?\n\n` +
+      `<i>Ejemplo: tu.nombre@estudiantec.cr</i>`,
+    { parse_mode: 'HTML' },
+  );
+  logger.info({ chatId }, '/actualizar — registration reset, awaiting_username');
 });
 
 // ─── /cancelar ────────────────────────────────────────────────────────────────
@@ -162,7 +201,9 @@ bot.on('message:text', async (ctx) => {
 
   // ── Step 1: TEC username ────────────────────────────────────────────────────
   if (pending.step === 'awaiting_username') {
-    if (!isTecEmail(text)) {
+    const email = text.toLowerCase().trim();
+
+    if (!isTecEmail(email)) {
       await ctx.reply(
         '⚠️ Ese no parece ser un correo institucional del TEC.\n\n' +
           'Debe terminar en <code>@estudiantec.cr</code>.\n\n' +
@@ -172,12 +213,21 @@ bot.on('message:text', async (ctx) => {
       return;
     }
 
+    const userWithEmail = await getUserByTecUsername(email);
+    if (userWithEmail && userWithEmail.telegram_chat_id !== chatId) {
+      await ctx.reply(
+        '⚠️ Ese correo ya está registrado y asociado a otra cuenta de Telegram.\n\n' +
+          'Si eres el dueño y perdiste acceso a tu cuenta anterior, por favor contacta al administrador del sistema.',
+      );
+      return;
+    }
+
     await advancePendingRegistration(chatId, 'awaiting_password', {
-      tec_username: text.toLowerCase().trim(),
+      tec_username: email,
     });
 
     await ctx.reply(
-      `✅ Correo guardado: <code>${text.toLowerCase().trim()}</code>\n\n` +
+      `✅ Correo guardado: <code>${email}</code>\n\n` +
         `─────────────────────\n` +
         `🔑 <b>Paso 2 de 3</b>\n` +
         `¿Cuál es tu contraseña de TEC Digital?\n\n` +

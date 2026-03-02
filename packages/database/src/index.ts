@@ -2,6 +2,8 @@ export { getPool, closePool } from './client.js';
 export {
   getActiveUsers,
   getUserById,
+  getUserByTelegramChatId,
+  getUserByTecUsername,
   createUser,
   notificationExists,
   getNotificationState,
