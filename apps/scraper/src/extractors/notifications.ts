@@ -25,6 +25,7 @@ interface TecNotificationItem {
 interface InternalDispatchResponse {
   status: 'success' | 'error';
   processed?: boolean;
+  reason?: string;
   error?: string;
 }
 
@@ -174,52 +175,11 @@ export async function processNotificationsSequentially(
           },
         );
 
-        const shouldDelete = shouldDeleteFromTec(response.status, response.data);
-
-        if (!shouldDelete) {
-          extractorLogger.warn(
-            {
-              userId,
-              externalId: parsed.external_id,
-              status: response.status,
-              dispatchResponse: response.data,
-            },
-            'Skipping TEC delete because Core did not fully process notification',
-          );
-          continue;
-        }
-
-        const tecNotifId = item.notification_id ?? item.id;
-        if (!tecNotifId) {
-          extractorLogger.warn(
-            { userId, externalId: parsed.external_id },
-            'Missing TEC notification id — cannot delete from TEC',
-          );
-          continue;
-        }
-
-        const delUrl = `https://tecdigital.tec.ac.cr/tda-notifications/ajax/notification_delete?notification_id=${tecNotifId}`;
-        const delRes = await requestWithRetry(() => client.client.get(delUrl), {
-          endpoint: 'tec.notification_delete',
-          metrics,
-          logger: extractorLogger,
-        });
-
-        if (delRes.status === 200) {
-          extractorLogger.info(
-            { userId, notificationId: item.id, externalId: parsed.external_id },
-            'Notification deleted in TEC',
-          );
-        } else {
-          extractorLogger.warn(
-            {
-              userId,
-              notificationId: item.id,
-              status: delRes.status,
-            },
-            'TEC delete endpoint returned non-200',
-          );
-        }
+        const dispatchResult = response.data;
+        extractorLogger.debug(
+          { userId, externalId: parsed.external_id, reason: dispatchResult?.reason },
+          'Notification dispatched',
+        );
       } catch (error) {
         extractorLogger.error(
           { userId, index, error },
