@@ -135,6 +135,121 @@ export async function insertUploadedFile(
   );
 }
 
+// ─── User Creation ────────────────────────────────────────────────────────────
+
+/**
+ * Creates a new user. Returns the new user's UUID.
+ * On tec_username conflict, updates password, chat_id, and drive_folder_id.
+ */
+export async function createUser(params: {
+  name: string;
+  tec_username: string;
+  tec_password_enc: string;
+  telegram_chat_id: string;
+  drive_root_folder_id: string | null;
+}): Promise<string> {
+  const pool = getPool();
+  const res = await pool.query<{ id: string }>(
+    `INSERT INTO users (name, tec_username, tec_password_enc, telegram_chat_id, drive_root_folder_id, is_active)
+     VALUES ($1, $2, $3, $4, $5, TRUE)
+     ON CONFLICT (tec_username) DO UPDATE
+       SET tec_password_enc     = EXCLUDED.tec_password_enc,
+           telegram_chat_id     = EXCLUDED.telegram_chat_id,
+           drive_root_folder_id = EXCLUDED.drive_root_folder_id,
+           is_active            = TRUE
+     RETURNING id`,
+    [
+      params.name,
+      params.tec_username,
+      params.tec_password_enc,
+      params.telegram_chat_id,
+      params.drive_root_folder_id,
+    ],
+  );
+  return res.rows[0].id;
+}
+
+// ─── Pending Bot Registration Queries ────────────────────────────────────────
+
+export type RegistrationStep =
+  | 'awaiting_username'
+  | 'awaiting_password'
+  | 'awaiting_drive_folder'
+  | 'awaiting_confirmation'
+  | 'done';
+
+export interface PendingRegistration {
+  id: string;
+  chat_id: string;
+  step: RegistrationStep;
+  tec_username: string | null;
+  tec_password_enc: string | null;
+  drive_folder_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+/** Returns the in-progress registration for a Telegram chat_id, or null. */
+export async function getPendingRegistration(chatId: string): Promise<PendingRegistration | null> {
+  const pool = getPool();
+  const res = await pool.query<PendingRegistration>(
+    'SELECT * FROM pending_registrations WHERE chat_id = $1',
+    [chatId],
+  );
+  return res.rows[0] ?? null;
+}
+
+/** Creates or resets a pending registration for a chat_id (step: awaiting_username). */
+export async function upsertPendingRegistration(chatId: string): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO pending_registrations (chat_id, step, tec_username, tec_password_enc, drive_folder_id, updated_at)
+     VALUES ($1, 'awaiting_username', NULL, NULL, NULL, NOW())
+     ON CONFLICT (chat_id) DO UPDATE
+       SET step             = 'awaiting_username',
+           tec_username     = NULL,
+           tec_password_enc = NULL,
+           drive_folder_id  = NULL,
+           updated_at       = NOW()`,
+    [chatId],
+  );
+}
+
+/** Advances a pending registration to the next step. */
+export async function advancePendingRegistration(
+  chatId: string,
+  step: RegistrationStep,
+  data: {
+    tec_username?: string;
+    tec_password_enc?: string;
+    drive_folder_id?: string | null;
+  },
+): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE pending_registrations
+     SET step             = $2,
+         tec_username     = COALESCE($3, tec_username),
+         tec_password_enc = COALESCE($4, tec_password_enc),
+         drive_folder_id  = COALESCE($5, drive_folder_id),
+         updated_at       = NOW()
+     WHERE chat_id = $1`,
+    [
+      chatId,
+      step,
+      data.tec_username ?? null,
+      data.tec_password_enc ?? null,
+      data.drive_folder_id ?? null,
+    ],
+  );
+}
+
+/** Deletes a pending registration once the user is fully registered. */
+export async function deletePendingRegistration(chatId: string): Promise<void> {
+  const pool = getPool();
+  await pool.query('DELETE FROM pending_registrations WHERE chat_id = $1', [chatId]);
+}
+
 // ─── Drive OAuth Token Queries ───────────────────────────────────────────────
 
 /**

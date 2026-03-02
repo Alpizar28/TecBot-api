@@ -1,0 +1,17 @@
+FROM node:20-slim AS base
+WORKDIR /app
+
+RUN npm install -g pnpm@9
+
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+COPY packages/ ./packages/
+COPY apps/bot/ ./apps/bot/
+
+RUN pnpm install --frozen-lockfile
+RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm --filter @tec-brain/types build
+RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm --filter @tec-brain/database build
+RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm --filter @tec-brain/drive build
+
+ENV NODE_ENV=production
+
+CMD ["pnpm", "tsx", "--tsconfig", "tsconfig.base.json", "apps/bot/src/index.ts"]

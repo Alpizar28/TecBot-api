@@ -94,6 +94,29 @@ services:
       retries: 3
       start_period: 30s
 
+  bot:
+    build:
+      context: .
+      dockerfile: apps/bot/Dockerfile
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 200M
+        reservations:
+          memory: 64M
+    environment:
+      DATABASE_URL: 'postgresql://tecbrain:${POSTGRES_PASSWORD}@db:5432/tecbrain'
+      DB_ENCRYPTION_KEY: '${DB_ENCRYPTION_KEY}'
+      TELEGRAM_BOT_TOKEN: '${TELEGRAM_BOT_TOKEN}'
+      GOOGLE_OAUTH_CLIENT_PATH: '/app/data/credentials/oauth_client.json'
+      CORE_BASE_URL: 'http://core:3002'
+    volumes:
+      - credentials_data:/app/data/credentials:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   sessions_data:
