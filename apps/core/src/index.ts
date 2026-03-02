@@ -109,7 +109,14 @@ async function main() {
       if (!userId) {
         return reply
           .status(400)
-          .send({ error: 'Invalid or expired state param (CSRF protection)' });
+          .type('text/html')
+          .send(
+            `<html><body style="font-family:sans-serif;padding:2rem">
+            <h2>❌ Enlace expirado o inválido</h2>
+            <p>Este enlace de autorización ya fue usado o expiró (tienen validez de 10 minutos).</p>
+            <p>Por favor, solicita un nuevo enlace desde el bot de Telegram con el comando <b>/actualizar</b>.</p>
+            </body></html>`,
+          );
       }
 
       try {

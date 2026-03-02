@@ -9,3 +9,5 @@ CREATE TABLE IF NOT EXISTS oauth_states (
 
 -- Delete states older than 1 hour to prevent buildup
 -- This can be run periodically, but for now just the table is enough.
+
+CREATE INDEX IF NOT EXISTS idx_oauth_states_created_at ON oauth_states(created_at);

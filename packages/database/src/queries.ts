@@ -369,12 +369,15 @@ export async function createOAuthState(userId: string): Promise<string> {
 }
 
 /**
- * Consumes an OAuth state nonce, returning the associated userId if valid.
+ * Consumes an OAuth state nonce, returning the associated userId if valid and not expired (10 min TTL).
  */
 export async function consumeOAuthState(nonce: string): Promise<string | null> {
   const pool = getPool();
   const res = await pool.query<{ user_id: string }>(
-    'DELETE FROM oauth_states WHERE state_nonce = $1 RETURNING user_id',
+    `DELETE FROM oauth_states
+     WHERE state_nonce = $1
+       AND created_at > NOW() - INTERVAL '10 minutes'
+     RETURNING user_id`,
     [nonce],
   );
   return res.rows[0]?.user_id ?? null;
