@@ -571,6 +571,14 @@ async function main() {
   await runMigrations();
   logger.info('Migrations complete');
 
+  logger.info('Registering bot commands with Telegram');
+  await bot.api.setMyCommands([
+    { command: 'start', description: 'Registrar tu cuenta en el bot' },
+    { command: 'actualizar', description: 'Actualizar correo, contraseña o carpeta de Drive' },
+    { command: 'estado', description: 'Ver el estado de tu registro' },
+    { command: 'cancelar', description: 'Cancelar el registro en progreso' },
+  ]);
+
   logger.info('Starting bot (long polling)');
   // Start long-polling — grammY handles reconnects automatically
   await bot.start({
