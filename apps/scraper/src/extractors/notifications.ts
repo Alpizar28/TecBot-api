@@ -233,24 +233,164 @@ async function normalizeNotification(
 
   let files: NonNullable<RawNotification['files']> | undefined;
   let document_status: RawNotification['document_status'] | undefined;
+  let resolvedTitle: string | undefined;
+  let resolvedDescription: string | undefined;
 
   if (type === 'documento' && link) {
     const resolved = await resolveDocumentFiles(client, link);
     files = resolved;
     document_status = resolved.length > 0 ? 'resolved' : 'unresolved';
+  } else if (type === 'noticia' && link && isGenericNewsText(text)) {
+    const newsContent = await resolveNewsContent(client, link);
+    if (newsContent) {
+      resolvedTitle = newsContent.title;
+      resolvedDescription = newsContent.body;
+    }
   }
 
   return {
     external_id: `notif_${hashString(`${link}|${text.slice(0, 120)}`)}`,
     type,
     course,
-    title: text.split(' - ')[0] || text.slice(0, 120) || 'Notificación TEC',
-    description: text || 'Sin descripción',
+    title: resolvedTitle ?? (text.split(' - ')[0] || text.slice(0, 120) || 'Notificación TEC'),
+    description: (resolvedDescription ?? text) || 'Sin descripción',
     link,
     date: item.date_text || new Date().toISOString().slice(0, 10),
     files,
     document_status,
   };
+}
+
+const GENERIC_NEWS_TEXTS = [
+  'hay una nueva noticia en el curso',
+  'hay una nueva noticia',
+  'nueva noticia en el curso',
+];
+
+function isGenericNewsText(text: string): boolean {
+  const lower = text.toLowerCase().trim();
+  return GENERIC_NEWS_TEXTS.some((generic) => lower.includes(generic));
+}
+
+interface NewsContent {
+  title: string;
+  body: string;
+}
+
+async function resolveNewsContent(
+  client: TecHttpClient,
+  newsLink: string,
+): Promise<NewsContent | null> {
+  try {
+    const listUrl = ensureAbsoluteUrl(newsLink);
+    extractorLogger.debug({ url: listUrl }, 'Fetching news list page');
+
+    const listRes = await client.client.get<string>(listUrl);
+    const listHtml = String(listRes.data ?? '');
+
+    // Extract the first news item link from the list table.
+    // Pattern: <a href="item?item_id=XXXXXXX" ...>TITLE</a>
+    const itemLinkMatch = listHtml.match(/href="(item\?item_id=\d+)"/);
+    if (!itemLinkMatch?.[1]) {
+      extractorLogger.debug({ url: listUrl }, 'No news item link found in list page');
+      return null;
+    }
+
+    // Build absolute URL for the news item — relative to the list URL's directory
+    const baseUrl = listUrl.endsWith('/') ? listUrl : listUrl + '/';
+    const itemUrl = baseUrl + itemLinkMatch[1];
+    extractorLogger.debug({ itemUrl }, 'Fetching news item page');
+
+    const itemRes = await client.client.get<string>(itemUrl);
+    const itemHtml = String(itemRes.data ?? '');
+
+    const title = extractNewsTitle(itemHtml);
+    const body = extractNewsBody(itemHtml);
+
+    if (!title && !body) {
+      extractorLogger.debug({ itemUrl }, 'Could not extract content from news item page');
+      return null;
+    }
+
+    extractorLogger.info(
+      { source: newsLink, title, bodyLength: body.length },
+      'Resolved news content',
+    );
+
+    return { title: title || 'Noticia', body: body || title || 'Sin contenido' };
+  } catch (error) {
+    extractorLogger.error({ source: newsLink, error }, 'Error resolving news content');
+    return null;
+  }
+}
+
+function extractNewsTitle(html: string): string {
+  // The news item page has <h1>TITLE</h1> in the main content
+  const match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  if (!match?.[1]) return '';
+  return stripHtmlTags(match[1]).trim();
+}
+
+function extractNewsBody(html: string): string {
+  // The news item page has <div class="newsBody">...</div>
+  // We use index-based extraction to handle nested divs correctly.
+  const startTag = /<div[^>]+class="newsBody"[^>]*>/i;
+  const startMatch = html.match(startTag);
+  if (!startMatch) return '';
+
+  const openIdx = html.indexOf(startMatch[0]);
+  if (openIdx === -1) return '';
+
+  const contentStart = openIdx + startMatch[0].length;
+
+  // Walk forward counting open/close div tags to find the matching </div>
+  let depth = 1;
+  let pos = contentStart;
+  while (pos < html.length && depth > 0) {
+    const nextOpen = html.indexOf('<div', pos);
+    const nextClose = html.indexOf('</div', pos);
+
+    if (nextClose === -1) break;
+
+    if (nextOpen !== -1 && nextOpen < nextClose) {
+      depth++;
+      pos = nextOpen + 4;
+    } else {
+      depth--;
+      if (depth === 0) {
+        const innerHtml = html.slice(contentStart, nextClose);
+        return htmlToPlainText(innerHtml).trim();
+      }
+      pos = nextClose + 6;
+    }
+  }
+
+  return '';
+}
+
+function stripHtmlTags(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function htmlToPlainText(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<strong[^>]*>([\s\S]*?)<\/strong>/gi, '*$1*')
+    .replace(/<b[^>]*>([\s\S]*?)<\/b>/gi, '*$1*')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 async function resolveDocumentFiles(
