@@ -15,11 +15,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: tecbrain
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - '${DB_PORT:-5432}:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U tecbrain" ]
+      test: ['CMD-SHELL', 'pg_isready -U tecbrain']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -39,13 +39,19 @@ services:
           memory: 100M
     env_file: ../.env
     environment:
-      PORT: "3001"
+      PORT: '3001'
     ports:
-      - "${SCRAPER_PORT:-3001}:3001"
+      - '${SCRAPER_PORT:-3001}:3001'
     volumes:
       - sessions_data:/app/data/sessions
     healthcheck:
-      test: [ "CMD", "node", "-e", "fetch('http://localhost:3001/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" ]
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3001/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -64,11 +70,12 @@ services:
           memory: 100M
     env_file: ../.env
     environment:
-      PORT: "3002"
-      SCRAPER_URL: "http://scraper:3001"
-      DATABASE_URL: "postgresql://tecbrain:${POSTGRES_PASSWORD}@db:5432/tecbrain"
+      PORT: '3002'
+      SCRAPER_URL: 'http://scraper:3001'
+      DATABASE_URL: 'postgresql://tecbrain:${POSTGRES_PASSWORD}@db:5432/tecbrain'
+      GOOGLE_OAUTH_CLIENT_PATH: '/app/data/credentials/oauth_client.json'
     ports:
-      - "${CORE_PORT:-3002}:3002"
+      - '${CORE_PORT:-3002}:3002'
     volumes:
       - ../data/credentials:/app/data/credentials:ro
     depends_on:
@@ -77,7 +84,13 @@ services:
       scraper:
         condition: service_healthy
     healthcheck:
-      test: [ "CMD", "node", "-e", "fetch('http://localhost:3002/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" ]
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3002/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3

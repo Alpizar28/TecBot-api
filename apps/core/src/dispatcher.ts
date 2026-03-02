@@ -1,217 +1,304 @@
 import crypto from 'crypto';
+import axios from 'axios';
 import {
-    getNotificationState,
-    insertNotification,
-    updateNotificationDocumentStatus,
-    uploadedFileExists,
-    insertUploadedFile,
+  getNotificationState,
+  insertNotification,
+  updateNotificationDocumentStatus,
+  uploadedFileExists,
+  insertUploadedFile,
 } from '@tec-brain/database';
 import { TelegramService } from '@tec-brain/telegram';
 import { DriveService } from '@tec-brain/drive';
-import type { User, RawNotification, ScrapeResponse } from '@tec-brain/types';
+import type { User, RawNotification } from '@tec-brain/types';
 import { logger } from './logger.js';
 
 interface LoggerLike {
-    info: (...args: unknown[]) => void;
-    warn: (...args: unknown[]) => void;
+  info: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
 }
 
 export interface DispatchResult {
-    processed: boolean;
-    reason: string;
+  processed: boolean;
+  reason: string;
 }
 
 export async function dispatch(
-    user: User,
-    notification: RawNotification,
-    cookies: ScrapeResponse['cookies'],
-    telegram: TelegramService,
-    drive: DriveService | null,
+  user: User,
+  notification: RawNotification,
+  scraperUrl: string,
+  tecPassword: string,
+  telegram: TelegramService,
+  drive: DriveService | null,
 ): Promise<DispatchResult> {
-    const log = logger.child({
-        component: 'dispatcher',
-        userId: user.id,
-        externalId: notification.external_id,
-        type: notification.type,
-    });
+  const log = logger.child({
+    component: 'dispatcher',
+    userId: user.id,
+    externalId: notification.external_id,
+    type: notification.type,
+  });
 
-    const { exists, document_status: previousStatus } = await getNotificationState(user.id, notification.external_id);
-    const isDocument = notification.type === 'documento';
-    const resolvedNow = notification.document_status === 'resolved' && !!notification.files?.length;
-    let hasPendingUploads = false;
+  const { exists, document_status: previousStatus } = await getNotificationState(
+    user.id,
+    notification.external_id,
+  );
+  const isDocument = notification.type === 'documento';
+  const resolvedNow = notification.document_status === 'resolved' && !!notification.files?.length;
+  let hasPendingUploads = false;
 
-    if (exists && isDocument && notification.files && notification.files.length > 0) {
-        for (const file of notification.files) {
-            const fileHash = crypto.createHash('sha256').update(file.download_url + file.file_name).digest('hex');
-            if (!(await uploadedFileExists(user.id, fileHash))) {
-                hasPendingUploads = true;
-                break;
-            }
-        }
+  if (exists && isDocument && notification.files && notification.files.length > 0) {
+    for (const file of notification.files) {
+      const fileHash = crypto
+        .createHash('sha256')
+        .update(file.download_url + file.file_name)
+        .digest('hex');
+      if (!(await uploadedFileExists(user.id, fileHash))) {
+        hasPendingUploads = true;
+        break;
+      }
     }
+  }
 
-    const shouldRetryDocument =
-        exists &&
-        isDocument &&
-        resolvedNow &&
-        (previousStatus !== 'resolved' || hasPendingUploads);
+  const shouldRetryDocument =
+    exists && isDocument && resolvedNow && (previousStatus !== 'resolved' || hasPendingUploads);
 
-    if (exists && !shouldRetryDocument) {
-        log.info({ previousStatus }, 'Duplicate notification already handled');
-        return { processed: true, reason: 'duplicate' };
+  if (exists && !shouldRetryDocument) {
+    log.info({ previousStatus }, 'Duplicate notification already handled');
+    return { processed: true, reason: 'duplicate' };
+  }
+
+  if (shouldRetryDocument) {
+    log.info(
+      { previousStatus, hasPendingUploads },
+      'Retrying previously unresolved/partial document notification',
+    );
+  }
+
+  let processed = true;
+
+  try {
+    switch (notification.type) {
+      case 'noticia': {
+        processed = await safeTelegram(
+          user,
+          notification,
+          () => telegram.sendNotice(user, notification),
+          'telegram_notice',
+        );
+        break;
+      }
+
+      case 'evaluacion': {
+        processed = await safeTelegram(
+          user,
+          notification,
+          () => telegram.sendEvaluation(user, notification),
+          'telegram_eval',
+        );
+        break;
+      }
+
+      case 'documento': {
+        processed = await handleDocumentNotification(
+          user,
+          notification,
+          scraperUrl,
+          tecPassword,
+          telegram,
+          drive,
+          log,
+        );
+        break;
+      }
     }
+  } catch (error) {
+    processed = false;
+    logStructuredError(user, notification, 'dispatch_internal', error);
+  }
 
-    if (shouldRetryDocument) {
-        log.info({ previousStatus, hasPendingUploads }, 'Retrying previously unresolved/partial document notification');
+  if (processed || exists) {
+    if (!exists) {
+      log.info('Marking new notification as seen');
+      await insertNotification(user.id, notification);
+    } else if (shouldRetryDocument && notification.document_status === 'resolved') {
+      log.info('Updating existing document notification status to resolved');
+      await updateNotificationDocumentStatus(user.id, notification.external_id, 'resolved');
     }
+  } else {
+    log.warn(
+      'Notification had partial/failed processing and was not previously seen; skipping persistence to allow retry',
+    );
+  }
 
-    let processed = true;
-
-    try {
-        switch (notification.type) {
-            case 'noticia': {
-                processed = await safeTelegram(
-                    user,
-                    notification,
-                    () => telegram.sendNotice(user, notification),
-                    'telegram_notice',
-                );
-                break;
-            }
-
-            case 'evaluacion': {
-                processed = await safeTelegram(
-                    user,
-                    notification,
-                    () => telegram.sendEvaluation(user, notification),
-                    'telegram_eval',
-                );
-                break;
-            }
-
-            case 'documento': {
-                processed = await handleDocumentNotification(user, notification, cookies, telegram, drive, log);
-                break;
-            }
-        }
-    } catch (error) {
-        processed = false;
-        logStructuredError(user, notification, 'dispatch_internal', error);
-    }
-
-    if (processed || exists) {
-        if (!exists) {
-            log.info('Marking new notification as seen');
-            await insertNotification(user.id, notification);
-        } else if (shouldRetryDocument && notification.document_status === 'resolved') {
-            log.info('Updating existing document notification status to resolved');
-            await updateNotificationDocumentStatus(user.id, notification.external_id, 'resolved');
-        }
-    } else {
-        log.warn('Notification had partial/failed processing and was not previously seen; skipping persistence to allow retry');
-    }
-
-    return {
-        processed,
-        reason: processed ? 'processed' : 'partial_or_failed',
-    };
+  return {
+    processed,
+    reason: processed ? 'processed' : 'partial_or_failed',
+  };
 }
 
 async function handleDocumentNotification(
-    user: User,
-    notification: RawNotification,
-    cookies: ScrapeResponse['cookies'],
-    telegram: TelegramService,
-    drive: DriveService | null,
-    log: LoggerLike,
+  user: User,
+  notification: RawNotification,
+  scraperUrl: string,
+  tecPassword: string,
+  telegram: TelegramService,
+  drive: DriveService | null,
+  log: LoggerLike,
 ): Promise<boolean> {
-    if (drive && user.drive_root_folder_id && notification.files && notification.files.length > 0) {
-        const userFolderId = await drive.ensureFolder(user.name, user.drive_root_folder_id);
-        const courseFolderId = await drive.ensureFolder(notification.course, userFolderId);
+  if (drive && user.drive_root_folder_id && notification.files && notification.files.length > 0) {
+    const userFolderId = await drive.ensureFolder(user.name, user.drive_root_folder_id);
+    const courseFolderId = await drive.ensureFolder(notification.course, userFolderId);
 
-        const results = await Promise.all(
-            notification.files.map(async (file) => {
-                try {
-                    const fileHash = crypto.createHash('sha256').update(file.download_url + file.file_name).digest('hex');
+    const results = await Promise.all(
+      notification.files.map(async (file) => {
+        try {
+          const fileHash = crypto
+            .createHash('sha256')
+            .update(file.download_url + file.file_name)
+            .digest('hex');
 
-                    if (await uploadedFileExists(user.id, fileHash)) {
-                        log.info({ fileName: file.file_name }, 'Skipping duplicate document upload');
-                        return true;
-                    }
+          if (await uploadedFileExists(user.id, fileHash)) {
+            log.info({ fileName: file.file_name }, 'Skipping duplicate document upload');
+            return true;
+          }
 
-                    const { fileId } = await drive.downloadAndUpload(
-                        file.download_url,
-                        file.file_name,
-                        courseFolderId,
-                        cookies,
-                    );
+          log.info(
+            { fileName: file.file_name, downloadUrl: file.download_url },
+            'Attempting Drive upload',
+          );
 
-                    await insertUploadedFile(user.id, notification.course, fileHash, file.file_name, fileId);
-                    const notified = await safeTelegram(
-                        user,
-                        notification,
-                        () => telegram.sendDocumentSaved(user, notification, file.file_name, fileId),
-                        'telegram_doc_saved',
-                    );
-                    return notified;
-                } catch (error) {
-                    logStructuredError(user, notification, 'drive_upload', error);
-                    return await safeTelegram(
-                        user,
-                        notification,
-                        () => telegram.sendDocumentDownload(user, notification, file.file_name, file.download_url),
-                        'telegram_doc_fallback',
-                    );
-                }
-            }),
-        );
+          // Downloader: proxy the download through the scraper so the active
+          // CookieJar session is used instead of raw exported cookies.
+          const downloader = async () => {
+            const res = await axios.post<ArrayBuffer>(
+              `${scraperUrl}/download-file`,
+              {
+                username: user.tec_username,
+                password: tecPassword,
+                downloadUrl: file.download_url,
+              },
+              { responseType: 'arraybuffer', timeout: 60_000 },
+            );
+            const contentType =
+              (res.headers['content-type'] as string | undefined) ?? 'application/octet-stream';
+            return { data: res.data, contentType };
+          };
 
-        return results.every(Boolean);
-    }
+          const { fileId } = await drive.downloadAndUpload(
+            downloader,
+            file.file_name,
+            courseFolderId,
+          );
 
-    if (notification.files && notification.files.length > 0) {
-        const results = await Promise.all(
-            notification.files.map((file) => safeTelegram(
-                user,
-                notification,
-                () => telegram.sendDocumentDownload(user, notification, file.file_name, file.download_url),
-                'telegram_doc_download',
-            )),
-        );
-        return results.every(Boolean);
-    }
-
-    return safeTelegram(
-        user,
-        notification,
-        () => telegram.sendDocumentLink(user, notification),
-        'telegram_doc_link',
+          await insertUploadedFile(user.id, notification.course, fileHash, file.file_name, fileId);
+          const notified = await safeTelegram(
+            user,
+            notification,
+            () => telegram.sendDocumentSaved(user, notification, file.file_name, fileId),
+            'telegram_doc_saved',
+          );
+          return notified;
+        } catch (error) {
+          logStructuredError(user, notification, 'drive_upload', error);
+          const notified = await safeTelegram(
+            user,
+            notification,
+            () =>
+              telegram.sendDocumentDownload(user, notification, file.file_name, file.download_url),
+            'telegram_doc_fallback',
+          );
+          if (notified) {
+            // Mark file as processed via fallback so it is not retried next cycle.
+            // Without this, hasPendingUploads stays true and the notification is
+            // re-dispatched every cycle, sending duplicate Telegram messages.
+            const fileHash = crypto
+              .createHash('sha256')
+              .update(file.download_url + file.file_name)
+              .digest('hex');
+            await insertUploadedFile(
+              user.id,
+              notification.course,
+              fileHash,
+              file.file_name,
+              'fallback',
+            );
+            log.info(
+              { fileName: file.file_name },
+              'Marked document as fallback-sent to prevent duplicate retries',
+            );
+          }
+          return notified;
+        }
+      }),
     );
+
+    return results.every(Boolean);
+  }
+
+  if (notification.files && notification.files.length > 0) {
+    const results = await Promise.all(
+      notification.files.map((file) =>
+        safeTelegram(
+          user,
+          notification,
+          () =>
+            telegram.sendDocumentDownload(user, notification, file.file_name, file.download_url),
+          'telegram_doc_download',
+        ),
+      ),
+    );
+    return results.every(Boolean);
+  }
+
+  return safeTelegram(
+    user,
+    notification,
+    () => telegram.sendDocumentLink(user, notification),
+    'telegram_doc_link',
+  );
 }
 
-function logStructuredError(user: User, notif: RawNotification, action: string, err: unknown): void {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    logger.error({
-        component: 'dispatcher',
-        userId: user.id,
-        externalId: notif.external_id,
-        type: notif.type,
-        action,
-        errorMessage: errorMsg,
-    }, 'Dispatch action failed');
+function logStructuredError(
+  user: User,
+  notif: RawNotification,
+  action: string,
+  err: unknown,
+): void {
+  const errorMsg = err instanceof Error ? err.message : String(err);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const axiosErr = axios.isAxiosError(err) ? (err as any) : null;
+  const axiosDetails = axiosErr
+    ? {
+        status: axiosErr.response?.status,
+        statusText: axiosErr.response?.statusText,
+        url: axiosErr.config?.url,
+        responseData: JSON.stringify(axiosErr.response?.data)?.slice(0, 500),
+      }
+    : undefined;
+  logger.error(
+    {
+      component: 'dispatcher',
+      userId: user.id,
+      externalId: notif.external_id,
+      type: notif.type,
+      action,
+      errorMessage: errorMsg,
+      ...(axiosDetails ? { axiosDetails } : {}),
+    },
+    'Dispatch action failed',
+  );
 }
 
 async function safeTelegram(
-    user: User,
-    notif: RawNotification,
-    fn: () => Promise<void>,
-    action: string,
+  user: User,
+  notif: RawNotification,
+  fn: () => Promise<void>,
+  action: string,
 ): Promise<boolean> {
-    try {
-        await fn();
-        return true;
-    } catch (error) {
-        logStructuredError(user, notif, action, error);
-        return false;
-    }
+  try {
+    await fn();
+    return true;
+  } catch (error) {
+    logStructuredError(user, notif, action, error);
+    return false;
+  }
 }
