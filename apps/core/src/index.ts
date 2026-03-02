@@ -83,8 +83,7 @@ async function main() {
 
     // Generate secure state nonce for CSRF protection
     const state = await createOAuthState(userId);
-    const baseUrl = getAuthorizationUrl(oauthClient);
-    const authUrl = `${baseUrl}&state=${encodeURIComponent(state)}`;
+    const authUrl = getAuthorizationUrl(oauthClient, state);
     return reply.redirect(authUrl);
   });
 
@@ -142,8 +141,7 @@ async function main() {
     const { userId } = request.query;
     if (!userId) return reply.status(400).send({ error: 'Missing userId query param' });
     const state = await createOAuthState(userId);
-    const baseUrl = getAuthorizationUrl(oauthClient);
-    const authUrl = `${baseUrl}&state=${encodeURIComponent(state)}`;
+    const authUrl = getAuthorizationUrl(oauthClient, state);
     return { authUrl };
   });
 

@@ -37,17 +37,24 @@ export function loadOAuthClientConfig(oauthClientPath: string): OAuthClient {
 /**
  * Returns the Google OAuth2 authorization URL the user must open in their browser.
  */
-export function getAuthorizationUrl(oauthClient: OAuthClient): string {
+export function getAuthorizationUrl(oauthClient: OAuthClient, state?: string): string {
   const oauth2 = new google.auth.OAuth2(
     oauthClient.clientId,
     oauthClient.clientSecret,
     oauthClient.redirectUri,
   );
-  return oauth2.generateAuthUrl({
+
+  const options: Parameters<typeof oauth2.generateAuthUrl>[0] = {
     access_type: 'offline',
     scope: ['https://www.googleapis.com/auth/drive'],
     prompt: 'consent', // force refresh_token on every authorization
-  });
+  };
+
+  if (state) {
+    options.state = state;
+  }
+
+  return oauth2.generateAuthUrl(options);
 }
 
 /**

@@ -85,8 +85,7 @@ function isTecEmail(value: string): boolean {
 async function buildDriveAuthUrl(userId: string): Promise<string> {
   if (!oauthClient) throw new Error('OAuth client not configured');
   const state = await createOAuthState(userId);
-  const base = getAuthorizationUrl(oauthClient);
-  return `${base}&state=${encodeURIComponent(state)}`;
+  return getAuthorizationUrl(oauthClient, state);
 }
 
 // ─── Menus ────────────────────────────────────────────────────────────────────
@@ -173,7 +172,7 @@ const confirmMenu = new Menu<BotContext>('confirm-menu')
           `─────────────────────\n` +
           `📁 <b>Último paso — Autorizar Google Drive</b>\n\n` +
           `Para que el bot pueda subir tus archivos a Drive, necesitas autorizarlo una sola vez:\n\n` +
-          `👉 <a href="${driveUrl}">Toca aquí para autorizar Google Drive</a>\n\n` +
+          `👉 <a href="${driveUrl.replace(/&/g, '&amp;')}">Toca aquí para autorizar Google Drive</a>\n\n` +
           `<i>Se abrirá una página de Google. Selecciona tu cuenta y acepta los permisos.</i>\n\n` +
           `Si no quieres Drive ahora, puedes ignorar este paso. Recibirás los archivos igualmente con enlaces directos.`,
         { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
