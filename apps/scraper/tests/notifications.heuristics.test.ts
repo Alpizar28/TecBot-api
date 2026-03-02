@@ -8,23 +8,41 @@ import {
 
 describe('notifications heuristics', () => {
   it('classifies document notifications from file-storage links', () => {
-    expect(classifyType('', 'Nuevo material disponible', '/dotlrn/file-storage/#/123#/')).toBe('documento');
+    expect(classifyType('', 'Nuevo material disponible', '/dotlrn/file-storage/#/123#/')).toBe(
+      'documento',
+    );
   });
 
   it('classifies evaluation notifications from keywords', () => {
-    expect(classifyType('', 'Se publico examen parcial', '/dotlrn/classes/EL2207')).toBe('evaluacion');
+    expect(classifyType('', 'Se publico examen parcial', '/dotlrn/classes/EL2207')).toBe(
+      'evaluacion',
+    );
   });
 
   it('extracts course from labeled text', () => {
-    expect(extractCourse('Curso: Matematica Discreta | Se subio material')).toBe('Matematica Discreta');
+    expect(extractCourse('Curso: Matematica Discreta | Se subio material')).toBe(
+      'Matematica Discreta',
+    );
   });
 
   it('extracts course from separator', () => {
     expect(extractCourse('EL2207 - Se actualizo el contenido del curso')).toBe('EL2207');
   });
 
+  it('prioritizes full text name over URL code', () => {
+    expect(extractCourse('Física General II - Tarea 1', '/dotlrn/classes/fi2207/')).toBe(
+      'Física General II',
+    );
+  });
+
+  it('falls back to URL code if no text name is found', () => {
+    expect(extractCourse('Nueva notificación', '/dotlrn/classes/fi2207/')).toBe('FI2207');
+  });
+
   it('normalizes relative TEC urls', () => {
-    expect(ensureAbsoluteUrl('/dotlrn/classes/EL2207')).toBe('https://tecdigital.tec.ac.cr/dotlrn/classes/EL2207');
+    expect(ensureAbsoluteUrl('/dotlrn/classes/EL2207')).toBe(
+      'https://tecdigital.tec.ac.cr/dotlrn/classes/EL2207',
+    );
   });
 
   it('deletes in TEC only when dispatch confirms processed true', () => {
