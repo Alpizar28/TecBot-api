@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { RawNotification } from '@tec-brain/types';
@@ -194,6 +195,32 @@ export async function processNotificationsSequentially(
   }
 }
 
+/**
+ * Builds a stable external_id for a notification.
+ *
+ * Priority:
+ * 1. If TEC provides a numeric `notification_id` / `id`, use `notif_<id>`.
+ *    This is the only truly stable identifier across scrape cycles.
+ * 2. Otherwise, produce a deterministic 16-char hex fingerprint from the
+ *    notification's link and full text using SHA-256.  This guarantees the
+ *    same notification always yields the same id, regardless of cycle timing
+ *    or minor whitespace differences in the surrounding wrapper.
+ *
+ * The old djb2 `hashString` helper was a 32-bit hash with overflow issues
+ * that could produce different results for the same input under JS engine
+ * optimizations, and had a high collision probability for short inputs.
+ */
+export function buildExternalId(
+  tecId: string | number | undefined | null,
+  link: string,
+  text: string,
+): string {
+  if (tecId !== undefined && tecId !== null && String(tecId) !== '') {
+    return `notif_${tecId}`;
+  }
+  return `notif_${crypto.createHash('sha256').update(`${link}|${text}`).digest('hex').slice(0, 16)}`;
+}
+
 async function normalizeNotification(
   client: TecHttpClient,
   item: TecNotificationItem,
@@ -239,8 +266,15 @@ async function normalizeNotification(
     }
   }
 
+  // When TEC provides a numeric notification_id, use it directly — it's the
+  // only truly stable identifier across scrape cycles.
+  // Fallback: build a deterministic SHA-256 fingerprint from the link (most
+  // stable) and the full text.  Using crypto.createHash avoids hash collisions
+  // and guarantees the same notification always produces the same external_id.
+  const external_id = buildExternalId(tecId, link, text);
+
   return {
-    external_id: tecId ? `notif_${tecId}` : `notif_${hashString(`${link}|${text.slice(0, 120)}`)}`,
+    external_id,
     type,
     course,
     title: resolvedTitle ?? (text.split(' - ')[0] || text.slice(0, 120) || 'Notificación TEC'),
@@ -832,14 +866,4 @@ function inferMimeType(
   if (source.includes('.zip')) return 'application/zip';
   if (source.includes('.txt')) return 'text/plain';
   return undefined;
-}
-
-function hashString(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash |= 0;
-  }
-  return Math.abs(hash).toString(36);
 }
