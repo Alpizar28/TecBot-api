@@ -71,7 +71,12 @@ services:
       PORT: '3002'
       SCRAPER_URL: 'http://scraper:3001'
       DATABASE_URL: 'postgresql://tecbrain:${POSTGRES_PASSWORD}@db:5432/tecbrain'
+      DB_ENCRYPTION_KEY: '${DB_ENCRYPTION_KEY}'
+      TELEGRAM_BOT_TOKEN: '${TELEGRAM_BOT_TOKEN}'
       GOOGLE_OAUTH_CLIENT_PATH: '/app/data/credentials/oauth_client.json'
+      DRIVE_ROOT_FOLDER_ID: '${DRIVE_ROOT_FOLDER_ID}'
+      CRON_SCHEDULE: '${CRON_SCHEDULE}'
+      CORE_CONCURRENCY: '${CORE_CONCURRENCY}'
     ports:
       - '${CORE_PORT:-3002}:3002'
     volumes:
