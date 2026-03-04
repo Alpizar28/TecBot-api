@@ -39,8 +39,6 @@ services:
           memory: 100M
     environment:
       PORT: '3001'
-    ports:
-      - '${SCRAPER_PORT:-3001}:3001'
     volumes:
       - sessions_data:/app/data/sessions
     healthcheck:
@@ -77,8 +75,7 @@ services:
       DRIVE_ROOT_FOLDER_ID: '${DRIVE_ROOT_FOLDER_ID}'
       CRON_SCHEDULE: '${CRON_SCHEDULE}'
       CORE_CONCURRENCY: '${CORE_CONCURRENCY}'
-    ports:
-      - '${CORE_PORT:-3002}:3002'
+      INTERNAL_API_SECRET: '${INTERNAL_API_SECRET}'
     volumes:
       - credentials_data:/app/data/credentials:ro
     depends_on:

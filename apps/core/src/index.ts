@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import Fastify from 'fastify';
+import helmet from '@fastify/helmet';
 import cron from 'node-cron';
 import {
   getPool,
@@ -8,6 +9,8 @@ import {
   encrypt,
   createOAuthState,
   consumeOAuthState,
+  purgeExpiredOAuthStates,
+  reEncryptLegacyCbcRows,
 } from '@tec-brain/database';
 import { runOrchestrationCycle, handleInternalDispatch } from './orchestrator.js';
 import {
@@ -25,6 +28,9 @@ async function main() {
   logger.info({ component: 'core_startup' }, 'Running database migrations');
   await runMigrations();
   logger.info({ component: 'core_startup' }, 'Migrations complete');
+  logger.info({ component: 'core_startup' }, 'Re-encrypting legacy CBC rows to AES-256-GCM');
+  await reEncryptLegacyCbcRows();
+  logger.info({ component: 'core_startup' }, 'Encryption upgrade complete');
 
   // Load OAuth client config if available
   const oauthClientPath = process.env.GOOGLE_OAUTH_CLIENT_PATH;
@@ -44,6 +50,7 @@ async function main() {
 
   // 2. Start health check Fastify server
   const fastify = Fastify({ logger: { level: 'info' } });
+  await fastify.register(helmet, { global: true });
 
   fastify.get('/health', async () => ({
     status: 'ok',
@@ -59,6 +66,14 @@ async function main() {
   fastify.post<{
     Body: { userId: string; notification: RawNotification; cookies: ScrapeResponse['cookies'] };
   }>('/api/internal-dispatch', async (request, reply) => {
+    // Verify shared secret to prevent unauthorized dispatch from outside the stack
+    const internalSecret = process.env.INTERNAL_API_SECRET;
+    if (internalSecret) {
+      const provided = request.headers['x-internal-secret'];
+      if (provided !== internalSecret) {
+        return reply.status(401).send({ status: 'error', error: 'Unauthorized' });
+      }
+    }
     try {
       const { userId, notification, cookies } = request.body;
       const result = await handleInternalDispatch(userId, notification, cookies);
@@ -171,12 +186,27 @@ async function main() {
     void runOrchestrationCycle();
   });
 
+  // Purge expired OAuth states every hour to prevent table bloat
+  const OAUTH_PURGE_INTERVAL_MS = 60 * 60 * 1000;
+  const oauthPurgeTimer = setInterval(() => {
+    purgeExpiredOAuthStates()
+      .then((deleted: number) => {
+        if (deleted > 0) {
+          logger.info({ component: 'core_oauth_purge', deleted }, 'Purged expired OAuth states');
+        }
+      })
+      .catch((err: unknown) => {
+        logger.warn({ component: 'core_oauth_purge', err }, 'Failed to purge OAuth states');
+      });
+  }, OAUTH_PURGE_INTERVAL_MS);
+
   logger.info({ component: 'core_startup', cronSchedule: CRON_SCHEDULE }, 'Cron scheduled');
   logger.info({ component: 'core_startup' }, 'Running initial orchestration cycle');
   await runOrchestrationCycle();
 
   const shutdown = async () => {
     job.stop();
+    clearInterval(oauthPurgeTimer);
     await fastify.close();
     await getPool().end();
     process.exit(0);

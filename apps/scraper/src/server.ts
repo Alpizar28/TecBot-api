@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import sensible from '@fastify/sensible';
+import helmet from '@fastify/helmet';
 import { SessionManager } from './sessions/session-manager.js';
 import { processNotificationsSequentially } from './extractors/notifications.js';
 import type { ScrapeResponse } from '@tec-brain/types';
@@ -16,6 +17,7 @@ export function buildServer(): FastifyInstance {
   });
 
   void fastify.register(sensible);
+  void fastify.register(helmet, { global: true });
 
   sessionManager = new SessionManager(SESSION_DIR, fastify.log);
 
@@ -27,7 +29,13 @@ export function buildServer(): FastifyInstance {
   // ── Sequential Scrape Endpoint ────────────────────────────────────────────
   fastify.post<{
     Params: { userId: string };
-    Body: { username: string; password: string; keywords?: string[]; dispatchUrl: string };
+    Body: {
+      username: string;
+      password: string;
+      keywords?: string[];
+      dispatchUrl: string;
+      dispatchSecret?: string;
+    };
   }>(
     '/process-sequential/:userId',
     {
@@ -43,6 +51,7 @@ export function buildServer(): FastifyInstance {
             username: { type: 'string' },
             password: { type: 'string' },
             dispatchUrl: { type: 'string', format: 'uri' },
+            dispatchSecret: { type: 'string' },
             keywords: { type: 'array', items: { type: 'string' } },
           },
           required: ['username', 'password', 'dispatchUrl'],
@@ -51,13 +60,20 @@ export function buildServer(): FastifyInstance {
     },
     async (request, reply): Promise<ScrapeResponse> => {
       const { userId } = request.params;
-      const { username, password, dispatchUrl, keywords = [] } = request.body;
+      const { username, password, dispatchUrl, dispatchSecret = '', keywords = [] } = request.body;
 
       try {
         const client = await sessionManager.getClient(username, password);
         const cookies = await sessionManager.getCookies(client);
 
-        await processNotificationsSequentially(client, userId, dispatchUrl, cookies, keywords);
+        await processNotificationsSequentially(
+          client,
+          userId,
+          dispatchUrl,
+          cookies,
+          keywords,
+          dispatchSecret,
+        );
 
         return reply.send({
           status: 'success',

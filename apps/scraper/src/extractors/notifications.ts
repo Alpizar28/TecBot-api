@@ -97,6 +97,7 @@ export async function processNotificationsSequentially(
   dispatchUrl: string,
   cookies: { name: string; value: string; domain?: string; path?: string }[],
   keywords: string[] = [],
+  dispatchSecret: string = '',
 ): Promise<void> {
   const metrics: MetricStore = {};
   try {
@@ -167,7 +168,10 @@ export async function processNotificationsSequentially(
                 notification: parsed,
                 cookies,
               },
-              { timeout: 120_000 },
+              {
+                timeout: 120_000,
+                headers: dispatchSecret ? { 'x-internal-secret': dispatchSecret } : {},
+              },
             ),
           {
             endpoint: 'core.internal_dispatch',

@@ -47,6 +47,20 @@ interface SessionData {
 }
 type BotContext = Context & SessionFlavor<SessionData>;
 
+// ─── Rate Limiter ─────────────────────────────────────────────────────────────
+
+/** Minimum milliseconds between commands from the same chat. */
+const RATE_LIMIT_WINDOW_MS = 3_000;
+const lastCommandAt = new Map<string, number>();
+
+function isRateLimited(chatId: string): boolean {
+  const now = Date.now();
+  const last = lastCommandAt.get(chatId) ?? 0;
+  if (now - last < RATE_LIMIT_WINDOW_MS) return true;
+  lastCommandAt.set(chatId, now);
+  return false;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Extracts a Drive folder ID from a full Drive URL or returns the raw string if it looks like an ID already. */
@@ -279,6 +293,7 @@ async function main() {
 
   bot.command('start', async (ctx) => {
     const chatId = String(ctx.chat.id);
+    if (isRateLimited(chatId)) return;
     const existingUser = await getUserByTelegramChatId(chatId);
 
     if (existingUser) {
@@ -310,6 +325,7 @@ async function main() {
 
   bot.command('actualizar', async (ctx) => {
     const chatId = String(ctx.chat.id);
+    if (isRateLimited(chatId)) return;
     const existingUser = await getUserByTelegramChatId(chatId);
 
     if (!existingUser) {
@@ -331,6 +347,7 @@ async function main() {
 
   bot.command('cancelar', async (ctx) => {
     const chatId = String(ctx.chat.id);
+    if (isRateLimited(chatId)) return;
     await deletePendingRegistration(chatId);
     await ctx.reply('❌ Registro cancelado. Envía /start cuando quieras intentarlo de nuevo.', {
       parse_mode: 'HTML',
@@ -341,6 +358,7 @@ async function main() {
 
   bot.command('estado', async (ctx) => {
     const chatId = String(ctx.chat.id);
+    if (isRateLimited(chatId)) return;
     const pending = await getPendingRegistration(chatId);
 
     if (!pending || pending.step === 'done') {
@@ -375,6 +393,7 @@ async function main() {
 
   bot.on('message:text', async (ctx) => {
     const chatId = String(ctx.chat.id);
+    if (isRateLimited(chatId)) return;
     const text = ctx.message.text.trim();
 
     // Ignore commands (already handled above)

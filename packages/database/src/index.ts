@@ -18,6 +18,7 @@ export {
   saveDriveOAuthToken,
   createOAuthState,
   consumeOAuthState,
+  purgeExpiredOAuthStates,
   upsertCourseMapping,
   getCourseMapping,
   getPendingRegistration,
@@ -29,4 +30,4 @@ export {
   type RegistrationStep,
 } from './queries.js';
 export { runMigrations } from './migrate.js';
-export { encrypt, decrypt } from './crypto.js';
+export { encrypt, decrypt, reEncryptLegacyCbcRows } from './crypto.js';

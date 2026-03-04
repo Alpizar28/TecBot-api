@@ -165,6 +165,7 @@ async function processUser(
           username: user.tec_username,
           password,
           dispatchUrl: `http://core:${process.env.PORT ?? '3002'}/api/internal-dispatch`,
+          dispatchSecret: process.env.INTERNAL_API_SECRET ?? '',
         },
         { timeout: 300_000 },
       ),

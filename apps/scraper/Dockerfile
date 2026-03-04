@@ -16,6 +16,7 @@ RUN pnpm install --frozen-lockfile
 RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm --filter @tec-brain/types build
 
 ENV NODE_ENV=production
+USER node
 
 EXPOSE 3001
 CMD ["npx", "tsx", "--tsconfig", "tsconfig.base.json", "apps/scraper/src/index.ts"]

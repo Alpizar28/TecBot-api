@@ -383,6 +383,23 @@ export async function consumeOAuthState(nonce: string): Promise<string | null> {
   return res.rows[0]?.user_id ?? null;
 }
 
+/**
+ * Deletes all OAuth state nonces older than 1 hour.
+ * Should be called periodically (e.g. every hour) to prevent table bloat.
+ */
+export async function purgeExpiredOAuthStates(): Promise<number> {
+  const pool = getPool();
+  const res = await pool.query<{ count: string }>(
+    `WITH deleted AS (
+       DELETE FROM oauth_states
+       WHERE created_at < NOW() - INTERVAL '1 hour'
+       RETURNING 1
+     )
+     SELECT COUNT(*)::text AS count FROM deleted`,
+  );
+  return parseInt(res.rows[0]?.count ?? '0', 10);
+}
+
 // ─── Course Mappings ─────────────────────────────────────────────────────────
 
 /**
