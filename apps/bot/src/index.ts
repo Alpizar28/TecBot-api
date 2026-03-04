@@ -38,20 +38,7 @@ if (!BOT_TOKEN) {
 
 const CORE_BASE_URL = process.env.CORE_BASE_URL ?? 'http://core:3002';
 
-// ─── OAuth client (optional — Drive integration) ──────────────────────────────
-
-let oauthClient: OAuthClient | null = null;
-const oauthPath = process.env.GOOGLE_OAUTH_CLIENT_PATH;
-if (oauthPath) {
-  try {
-    oauthClient = loadOAuthClientConfig(oauthPath);
-    logger.info('Google OAuth client loaded — Drive auth available');
-  } catch (err) {
-    logger.warn({ err }, 'Could not load Google OAuth client — Drive auth unavailable');
-  }
-}
-
-// ─── Bot setup ────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 // We use a minimal session just to satisfy grammy's type system;
 // real state lives in the DB (pending_registrations table).
@@ -59,9 +46,6 @@ interface SessionData {
   _: null;
 }
 type BotContext = Context & SessionFlavor<SessionData>;
-
-const bot = new Bot<BotContext>(BOT_TOKEN);
-bot.use(session({ initial: (): SessionData => ({ _: null }) }));
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -82,494 +66,520 @@ function isTecEmail(value: string): boolean {
   return /^[a-zA-Z0-9._%+-]+@(estudiantec\.cr|itcr\.ac\.cr|tec\.ac\.cr)$/i.test(value.trim());
 }
 
-/** Builds the Google Drive auth URL for a user and returns it. */
-async function buildDriveAuthUrl(userId: string): Promise<string> {
-  if (!oauthClient) throw new Error('OAuth client not configured');
-  const state = await createOAuthState(userId);
-  return getAuthorizationUrl(oauthClient, state);
-}
-
-// ─── Menus ────────────────────────────────────────────────────────────────────
-
-// Confirmation Menu
-const confirmMenu = new Menu<BotContext>('confirm-menu')
-  .text('✅ Sí, completar registro', async (ctx) => {
-    const chatId = String(ctx.chat?.id);
-    const pending = await getPendingRegistration(chatId);
-
-    if (!pending || pending.step !== 'awaiting_confirmation') {
-      await ctx.reply('La sesión ha expirado o ya se completó.');
-      return;
-    }
-
-    if (!pending.tec_username || !pending.tec_password_enc) {
-      await ctx.reply('❌ Faltan datos. Envía /start para comenzar de nuevo.');
-      await deletePendingRegistration(chatId);
-      return;
-    }
-
-    // Derive a display name from the email (e.g. "juan.perez.1@estudiantec.cr" → "Juan Perez")
-    const namePart = pending.tec_username.split('@')[0];
-    const displayName = namePart
-      .split('.')
-      .filter((p: string) => !/^\d+$/.test(p)) // strip trailing numbers
-      .map((p: string) => p.charAt(0).toUpperCase() + p.slice(1))
-      .join(' ');
-
-    let userId: string;
-    try {
-      const existingUser = await getUserByTelegramChatId(chatId);
-      if (existingUser) {
-        // User is updating their info via /actualizar
-        userId = await updateUser(chatId, {
-          tec_username: pending.tec_username,
-          tec_password_enc: pending.tec_password_enc,
-          drive_root_folder_id: pending.drive_folder_id ?? null,
-        });
-      } else {
-        // Brand new user
-        userId = await createUser({
-          name: displayName,
-          tec_username: pending.tec_username,
-          tec_password_enc: pending.tec_password_enc,
-          telegram_chat_id: chatId,
-          drive_root_folder_id: pending.drive_folder_id ?? null,
-        });
-      }
-    } catch (err) {
-      logger.error({ err, chatId }, 'Failed to save user during registration');
-      await ctx.editMessageText(
-        '❌ Hubo un error al guardar tu cuenta. Si el correo ya estaba registrado, asegúrate de usar /actualizar. De lo contrario, intenta de nuevo.',
-      );
-      return;
-    }
-
-    await deletePendingRegistration(chatId);
-
-    logger.info(
-      { chatId, userId, username: pending.tec_username },
-      'User registered/updated via bot',
-    );
-
-    // ── Drive OAuth ─────────────────────────────────────────────────────────────
-    if (pending.drive_folder_id && oauthClient) {
-      let driveUrl: string;
-      try {
-        driveUrl = await buildDriveAuthUrl(userId);
-      } catch (err) {
-        logger.warn({ err, userId }, 'Could not build Drive auth URL');
-        await ctx.editMessageText(
-          `🎉 <b>¡Registro completado!</b>\n\n` +
-            `Ya estás configurado y comenzarás a recibir notificaciones de TEC Digital en los próximos minutos.\n\n` +
-            `⚠️ No se pudo generar el link de Google Drive. Contacta al administrador para activarlo.`,
-          { parse_mode: 'HTML' },
-        );
-        return;
-      }
-
-      await ctx.editMessageText(
-        `🎉 <b>¡Registro completado!</b>\n\n` +
-          `✅ Ya estás en el sistema.\n\n` +
-          `─────────────────────\n` +
-          `📁 <b>Último paso — Autorizar Google Drive</b>\n\n` +
-          `Para que el bot pueda subir tus archivos a Drive, necesitas autorizarlo una sola vez:\n\n` +
-          `👉 <a href="${driveUrl.replace(/&/g, '&amp;')}">Toca aquí para autorizar Google Drive</a>\n\n` +
-          `<i>Se abrirá una página de Google. Selecciona tu cuenta y acepta los permisos.</i>\n\n` +
-          `Si no quieres Drive ahora, puedes ignorar este paso. Recibirás los archivos igualmente con enlaces directos.`,
-        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
-      );
-    } else {
-      await ctx.editMessageText(
-        `🎉 <b>¡Registro completado, ${displayName}!</b>\n\n` +
-          `✅ En los próximos minutos comenzarás a recibir tus notificaciones de TEC Digital aquí en Telegram.\n\n` +
-          `─────────────────────\n` +
-          `<b>Comandos disponibles:</b>\n` +
-          `/estado — Ver el estado de tu cuenta\n` +
-          `/cancelar — Reiniciar el registro`,
-        { parse_mode: 'HTML' },
-      );
-    }
-  })
-  .row()
-  .text('❌ No, cancelar y volver a empezar', async (ctx) => {
-    const chatId = String(ctx.chat?.id);
-    await upsertPendingRegistration(chatId);
-    await ctx.editMessageText('🔄 Registro cancelado.');
-    await ctx.reply(
-      'Empecemos de nuevo.\n\n' +
-        '📧 <b>Paso 1 de 3</b>\n' +
-        '¿Cuál es tu correo institucional del TEC?',
-      { parse_mode: 'HTML' },
-    );
-  });
-
-// Drive Skip Menu
-const skipDriveMenu = new Menu<BotContext>('skip-drive-menu').text(
-  '⏭️ Omitir (No usar Google Drive)',
-  async (ctx) => {
-    const chatId = String(ctx.chat?.id);
-    await advancePendingRegistration(chatId, 'awaiting_confirmation', {
-      drive_folder_id: null,
-    });
-
-    const reg = await getPendingRegistration(chatId);
-
-    await ctx.editMessageText(
-      `📋 <b>Resumen de tu registro</b>\n\n` +
-        `📧 <b>Correo TEC:</b> <code>${reg?.tec_username ?? '?'}</code>\n` +
-        `🔑 <b>Contraseña:</b> <code>••••••••</code> (cifrada)\n` +
-        `📁 <b>Carpeta Drive:</b> ❌ Sin Drive (solo Telegram)\n\n` +
-        `─────────────────────\n` +
-        `¿Todo está bien?`,
-      { parse_mode: 'HTML', reply_markup: confirmMenu },
-    );
-  },
-);
-
-const updateMenu = new Menu<BotContext>('update-menu')
-  .text('🔐 Credenciales TEC', async (ctx) => {
-    const chatId = String(ctx.chat?.id);
-    await upsertPendingRegistrationWithStep(chatId, 'update_awaiting_username');
-    await ctx.editMessageText(
-      `🔄 <b>Actualización de Credenciales</b>\n\n` +
-        `¿Cuál es tu nuevo correo institucional del TEC?\n\n` +
-        `<i>Ejemplo: tu.nombre@estudiantec.cr</i>`,
-      { parse_mode: 'HTML' },
-    );
-  })
-  .row()
-  .text('📁 Carpeta Drive', async (ctx) => {
-    const chatId = String(ctx.chat?.id);
-    await upsertPendingRegistrationWithStep(chatId, 'update_awaiting_drive');
-    await ctx.editMessageText(
-      `📁 <b>Actualización de Carpeta Drive</b>\n\n` +
-        `Por favor, envía el nuevo ID o enlace de la carpeta de Google Drive que deseas usar.\n` +
-        `Si deseas dejar de usar Drive, envía la palabra <b>"no"</b>.`,
-      { parse_mode: 'HTML' },
-    );
-  })
-  .row()
-  .text('🔄 Actualizar Todo', async (ctx) => {
-    const chatId = String(ctx.chat?.id);
-    await upsertPendingRegistrationWithStep(chatId, 'awaiting_username');
-    await ctx.editMessageText(
-      `🔄 <b>Actualización Completa</b>\n\n` +
-        `Vamos a actualizar todos tus datos.\n\n` +
-        `📧 <b>Paso 1 de 3</b>\n` +
-        `¿Cuál es tu correo institucional del TEC?\n\n` +
-        `<i>Ejemplo: tu.nombre@estudiantec.cr</i>`,
-      { parse_mode: 'HTML' },
-    );
-  });
-
-bot.use(confirmMenu);
-bot.use(skipDriveMenu);
-bot.use(updateMenu);
-
-// ─── /start ───────────────────────────────────────────────────────────────────
-
-bot.command('start', async (ctx) => {
-  const chatId = String(ctx.chat.id);
-  const existingUser = await getUserByTelegramChatId(chatId);
-
-  if (existingUser) {
-    await ctx.reply(
-      `👋 ¡Hola de nuevo, <b>${existingUser.name}</b>!\n\n` +
-        `Veo que ya estás registrado en el sistema con el correo <code>${existingUser.tec_username}</code>.\n\n` +
-        `Si deseas actualizar tu contraseña o tu carpeta de Google Drive, envía el comando /actualizar.`,
-      { parse_mode: 'HTML' },
-    );
-    return;
-  }
-
-  await upsertPendingRegistration(chatId);
-
-  await ctx.reply(
-    `👋 ¡Hola! Soy el <b>TEC Brain Bot</b>.\n\n` +
-      `Te voy a configurar para recibir las notificaciones de <b>TEC Digital</b> directamente aquí en Telegram.\n\n` +
-      `Este proceso toma menos de 2 minutos.\n\n` +
-      `─────────────────────\n` +
-      `📧 <b>Paso 1 de 3</b>\n` +
-      `¿Cuál es tu correo institucional del TEC?\n\n` +
-      `<i>Ejemplo: tu.nombre@estudiantec.cr</i>`,
-    { parse_mode: 'HTML' },
-  );
-  logger.info({ chatId }, '/start — registration reset, awaiting_username');
-});
-
-// ─── /actualizar ──────────────────────────────────────────────────────────────
-
-bot.command('actualizar', async (ctx) => {
-  const chatId = String(ctx.chat.id);
-  const existingUser = await getUserByTelegramChatId(chatId);
-
-  if (!existingUser) {
-    await ctx.reply('❌ No tienes una cuenta registrada. Envía /start para comenzar.');
-    return;
-  }
-
-  await ctx.reply(`🔄 <b>Opciones de Actualización</b>\n\n` + `Selecciona qué deseas actualizar:`, {
-    parse_mode: 'HTML',
-    reply_markup: updateMenu,
-  });
-  logger.info({ chatId }, '/actualizar — showing update menu');
-});
-
-// ─── /cancelar ────────────────────────────────────────────────────────────────
-
-bot.command('cancelar', async (ctx) => {
-  const chatId = String(ctx.chat.id);
-  await deletePendingRegistration(chatId);
-  await ctx.reply('❌ Registro cancelado. Envía /start cuando quieras intentarlo de nuevo.', {
-    parse_mode: 'HTML',
-  });
-});
-
-// ─── /estado ──────────────────────────────────────────────────────────────────
-
-bot.command('estado', async (ctx) => {
-  const chatId = String(ctx.chat.id);
-  const pending = await getPendingRegistration(chatId);
-
-  if (!pending || pending.step === 'done') {
-    await ctx.reply(
-      '✅ Ya estás registrado y recibiendo notificaciones.\n\n' +
-        'Si necesitas actualizar tus datos, envía /actualizar para modificar tu configuración.',
-      { parse_mode: 'HTML' },
-    );
-    return;
-  }
-
-  const stepLabels: Record<RegistrationStep, string> = {
-    awaiting_username: 'Esperando tu correo del TEC',
-    awaiting_password: 'Esperando tu contraseña del TEC',
-    awaiting_drive_folder: 'Esperando la carpeta de Google Drive',
-    awaiting_confirmation: 'Esperando confirmación final',
-    done: 'Registro completado',
-    update_awaiting_username: 'Actualizando tu correo del TEC',
-    update_awaiting_password: 'Actualizando tu contraseña del TEC',
-    update_awaiting_drive: 'Actualizando la carpeta de Google Drive',
-  };
-
-  await ctx.reply(
-    `🔄 Tienes un registro en progreso.\n\n` +
-      `<b>Estado actual:</b> ${stepLabels[pending.step]}\n\n` +
-      `Continúa respondiendo a las preguntas anteriores, o envía /cancelar para empezar de nuevo.`,
-    { parse_mode: 'HTML' },
-  );
-});
-
-// ─── Message handler — main conversation flow ─────────────────────────────────
-
-bot.on('message:text', async (ctx) => {
-  const chatId = String(ctx.chat.id);
-  const text = ctx.message.text.trim();
-
-  // Ignore commands (already handled above)
-  if (text.startsWith('/')) return;
-
-  const pending = await getPendingRegistration(chatId);
-
-  if (!pending || pending.step === 'done') {
-    await ctx.reply('Envía /start para registrarte y comenzar a recibir notificaciones del TEC.');
-    return;
-  }
-
-  // ── Step 1: TEC username ────────────────────────────────────────────────────
-  if (pending.step === 'awaiting_username' || pending.step === 'update_awaiting_username') {
-    const email = text.toLowerCase().trim();
-
-    if (!isTecEmail(email)) {
-      await ctx.reply(
-        '⚠️ Ese no parece ser un correo institucional del TEC.\n\n' +
-          'Debe terminar en <code>@estudiantec.cr</code>.\n\n' +
-          '<i>Ejemplo: juan.perez.1@estudiantec.cr</i>',
-        { parse_mode: 'HTML' },
-      );
-      return;
-    }
-
-    const userWithEmail = await getUserByTecUsername(email);
-    if (userWithEmail && userWithEmail.telegram_chat_id !== chatId) {
-      await ctx.reply(
-        '⚠️ Este correo ya está registrado por otro usuario.\n\n' +
-          'Si es tuyo y quieres moverlo aquí, contacta al administrador.',
-      );
-      return;
-    }
-
-    const nextStep =
-      pending.step === 'update_awaiting_username'
-        ? 'update_awaiting_password'
-        : 'awaiting_password';
-
-    await advancePendingRegistration(chatId, nextStep, {
-      tec_username: email,
-    });
-
-    await ctx.reply(
-      `✅ Correo guardado: <code>${email}</code>\n\n` +
-        `─────────────────────\n` +
-        `🔑 <b>Paso 2</b>\n` +
-        `¿Cuál es tu contraseña del TEC Digital?\n\n` +
-        `<i>🔒 Se guardará cifrada y el bot la borrará de este chat inmediatamente por seguridad.</i>\n\n` +
-        `⚠️ <b>Después de que la envíes, borra el mensaje</b> por seguridad.`,
-      { parse_mode: 'HTML' },
-    );
-    return;
-  }
-
-  // ── Step 2: TEC password ────────────────────────────────────────────────────
-  if (pending.step === 'awaiting_password' || pending.step === 'update_awaiting_password') {
-    if (text.length < 4) {
-      await ctx.reply('⚠️ La contraseña parece muy corta. Inténtalo de nuevo.');
-      return;
-    }
-
-    const encryptedPwd = encrypt(text);
-
-    if (pending.step === 'update_awaiting_password') {
-      // Just update the credentials and finish
-      const userWithEmail = await getUserByTelegramChatId(chatId);
-      if (!userWithEmail) {
-        // Fallback in case user does not exist
-        await ctx.reply('❌ No se encontró tu usuario. Por favor, empieza con /start.');
-        return;
-      }
-
-      const emailToSave = pending.tec_username ?? userWithEmail.tec_username;
-      await updateUserCredentials(chatId, emailToSave, encryptedPwd);
-      await deletePendingRegistration(chatId);
-
-      await ctx.reply(
-        `✅ <b>Credenciales actualizadas correctamente.</b>\n\n` +
-          `A partir de ahora usaré tus nuevas credenciales para obtener notificaciones.`,
-        { parse_mode: 'HTML' },
-      );
-      return;
-    }
-
-    await advancePendingRegistration(chatId, 'awaiting_drive_folder', {
-      tec_password_enc: encryptedPwd,
-    });
-
-    await ctx.reply(
-      `✅ Contraseña guardada de forma segura.\n\n` +
-        `─────────────────────\n` +
-        `📁 <b>Paso 3 de 3</b>\n` +
-        `¿Quieres que el bot suba tus archivos y documentos a <b>Google Drive</b>?\n\n` +
-        `Si <b>sí</b>:\n` +
-        `1. Abre Google Drive y crea una carpeta (ej: <i>"Universidad"</i>).\n` +
-        `2. Entra a esa carpeta y copia el <b>ID</b> que aparece en la URL:\n` +
-        `   <code>drive.google.com/drive/folders/<b>ESTE_ES_EL_ID</b></code>\n` +
-        `3. Pégalo aquí en el chat.\n\n` +
-        `Si <b>no</b> quieres usar Drive, presiona el botón de abajo:`,
-      { parse_mode: 'HTML', reply_markup: skipDriveMenu },
-    );
-    return;
-  }
-
-  // ── Step 3: Drive folder ────────────────────────────────────────────────────
-  if (pending.step === 'awaiting_drive_folder' || pending.step === 'update_awaiting_drive') {
-    let folderId: string | null = null;
-
-    if (text.toLowerCase() !== 'no') {
-      folderId = parseDriveFolderId(text);
-      if (!folderId) {
-        await ctx.reply(
-          '⚠️ No pude identificar un ID de carpeta de Google Drive en lo que enviaste.\n\n' +
-            '• Copia el ID directamente de la URL de Drive:\n' +
-            '  <code>drive.google.com/drive/folders/<b>1AbcXyz...</b></code>\n\n' +
-            '• O presiona el botón para omitir Drive.',
-          {
-            parse_mode: 'HTML',
-            reply_markup: pending.step === 'awaiting_drive_folder' ? skipDriveMenu : undefined,
-          },
-        );
-        return;
-      }
-    }
-
-    if (pending.step === 'update_awaiting_drive') {
-      // Just update the drive folder and finish
-      const userWithEmail = await getUserByTelegramChatId(chatId);
-      if (!userWithEmail) {
-        await ctx.reply('❌ No se encontró tu usuario. Por favor, empieza con /start.');
-        return;
-      }
-
-      await updateUserDriveFolder(chatId, folderId);
-      await deletePendingRegistration(chatId);
-
-      const driveText = folderId
-        ? `✅ ID: <code>${folderId}</code>`
-        : '❌ Sin Drive (solo Telegram)';
-      let authMessage = '';
-
-      if (folderId) {
-        const driveUrl = await buildDriveAuthUrl(userWithEmail.id);
-        authMessage =
-          `\n\n⚠️ <b>¡Importante!</b> Debes volver a autorizar tu cuenta de Google Drive para la nueva carpeta.\n\n` +
-          `👉 <a href="${driveUrl.replace(/&/g, '&amp;')}">Toca aquí para autorizar Google Drive</a>`;
-      }
-
-      await ctx.reply(
-        `✅ <b>Carpeta de Drive actualizada.</b>\n\n` +
-          `📁 <b>Nueva Carpeta:</b> ${driveText}${authMessage}`,
-        { parse_mode: 'HTML' },
-      );
-      return;
-    }
-
-    await advancePendingRegistration(chatId, 'awaiting_confirmation', {
-      drive_folder_id: folderId,
-    });
-
-    // Re-fetch to get all data for the summary
-    const reg = await getPendingRegistration(chatId);
-    const driveText = folderId ? `✅ <code>${folderId}</code>` : '❌ Sin Drive (solo Telegram)';
-
-    await ctx.reply(
-      `📋 <b>Resumen de tu registro</b>\n\n` +
-        `📧 <b>Correo TEC:</b> <code>${reg?.tec_username ?? '?'}</code>\n` +
-        `🔑 <b>Contraseña:</b> <code>••••••••</code> (cifrada)\n` +
-        `📁 <b>Carpeta Drive:</b> ${driveText}\n\n` +
-        `─────────────────────\n` +
-        `¿Todo está bien?`,
-      { parse_mode: 'HTML', reply_markup: confirmMenu },
-    );
-    return;
-  }
-
-  // ── Step 4: Confirmation (fallback if typed) ────────────────────────────────
-  if (pending.step === 'awaiting_confirmation') {
-    await ctx.reply('Por favor, usa los botones de arriba para confirmar o cancelar el registro.', {
-      reply_markup: confirmMenu,
-    });
-    return;
-  }
-});
-
-// ─── Error handler ────────────────────────────────────────────────────────────
-
-bot.catch((err) => {
-  const ctx = err.ctx;
-  const update = { ...ctx.update } as any;
-
-  // Prevent logging passwords in plaintext
-  if (update.message?.text) {
-    update.message.text = '[REDACTED_FOR_SECURITY]';
-  }
-
-  logger.error({ err: err.error, update }, 'Bot error');
-});
-
 // ─── Startup ──────────────────────────────────────────────────────────────────
 
 async function main() {
   logger.info('Running database migrations');
   await runMigrations();
   logger.info('Migrations complete');
+
+  // ─── OAuth client (optional — Drive integration) ───────────────────────────
+
+  let oauthClient: OAuthClient | null = null;
+  const oauthPath = process.env.GOOGLE_OAUTH_CLIENT_PATH;
+  if (oauthPath) {
+    try {
+      oauthClient = loadOAuthClientConfig(oauthPath);
+      logger.info('Google OAuth client loaded — Drive auth available');
+    } catch (err) {
+      logger.warn({ err }, 'Could not load Google OAuth client — Drive auth unavailable');
+    }
+  }
+
+  /** Builds the Google Drive auth URL for a user and returns it. */
+  async function buildDriveAuthUrl(userId: string): Promise<string> {
+    if (!oauthClient) throw new Error('OAuth client not configured');
+    const state = await createOAuthState(userId);
+    return getAuthorizationUrl(oauthClient, state);
+  }
+
+  // ─── Bot setup — fresh instance every startup ──────────────────────────────
+
+  const bot = new Bot<BotContext>(BOT_TOKEN as string);
+  bot.use(session({ initial: (): SessionData => ({ _: null }) }));
+
+  // ─── Menus ─────────────────────────────────────────────────────────────────
+
+  // Confirmation Menu
+  const confirmMenu = new Menu<BotContext>('confirm-menu')
+    .text('✅ Sí, completar registro', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      const pending = await getPendingRegistration(chatId);
+
+      if (!pending || pending.step !== 'awaiting_confirmation') {
+        await ctx.reply('La sesión ha expirado o ya se completó.');
+        return;
+      }
+
+      if (!pending.tec_username || !pending.tec_password_enc) {
+        await ctx.reply('❌ Faltan datos. Envía /start para comenzar de nuevo.');
+        await deletePendingRegistration(chatId);
+        return;
+      }
+
+      // Derive a display name from the email (e.g. "juan.perez.1@estudiantec.cr" → "Juan Perez")
+      const namePart = pending.tec_username.split('@')[0];
+      const displayName = namePart
+        .split('.')
+        .filter((p: string) => !/^\d+$/.test(p)) // strip trailing numbers
+        .map((p: string) => p.charAt(0).toUpperCase() + p.slice(1))
+        .join(' ');
+
+      let userId: string;
+      try {
+        const existingUser = await getUserByTelegramChatId(chatId);
+        if (existingUser) {
+          // User is updating their info via /actualizar
+          userId = await updateUser(chatId, {
+            tec_username: pending.tec_username,
+            tec_password_enc: pending.tec_password_enc,
+            drive_root_folder_id: pending.drive_folder_id ?? null,
+          });
+        } else {
+          // Brand new user
+          userId = await createUser({
+            name: displayName,
+            tec_username: pending.tec_username,
+            tec_password_enc: pending.tec_password_enc,
+            telegram_chat_id: chatId,
+            drive_root_folder_id: pending.drive_folder_id ?? null,
+          });
+        }
+      } catch (err) {
+        logger.error({ err, chatId }, 'Failed to save user during registration');
+        await ctx.editMessageText(
+          '❌ Hubo un error al guardar tu cuenta. Si el correo ya estaba registrado, asegúrate de usar /actualizar. De lo contrario, intenta de nuevo.',
+        );
+        return;
+      }
+
+      await deletePendingRegistration(chatId);
+
+      logger.info(
+        { chatId, userId, username: pending.tec_username },
+        'User registered/updated via bot',
+      );
+
+      // ── Drive OAuth ───────────────────────────────────────────────────────────
+      if (pending.drive_folder_id && oauthClient) {
+        let driveUrl: string;
+        try {
+          driveUrl = await buildDriveAuthUrl(userId);
+        } catch (err) {
+          logger.warn({ err, userId }, 'Could not build Drive auth URL');
+          await ctx.editMessageText(
+            `🎉 <b>¡Registro completado!</b>\n\n` +
+              `Ya estás configurado y comenzarás a recibir notificaciones de TEC Digital en los próximos minutos.\n\n` +
+              `⚠️ No se pudo generar el link de Google Drive. Contacta al administrador para activarlo.`,
+            { parse_mode: 'HTML' },
+          );
+          return;
+        }
+
+        await ctx.editMessageText(
+          `🎉 <b>¡Registro completado!</b>\n\n` +
+            `✅ Ya estás en el sistema.\n\n` +
+            `─────────────────────\n` +
+            `📁 <b>Último paso — Autorizar Google Drive</b>\n\n` +
+            `Para que el bot pueda subir tus archivos a Drive, necesitas autorizarlo una sola vez:\n\n` +
+            `👉 <a href="${driveUrl.replace(/&/g, '&amp;')}">Toca aquí para autorizar Google Drive</a>\n\n` +
+            `<i>Se abrirá una página de Google. Selecciona tu cuenta y acepta los permisos.</i>\n\n` +
+            `Si no quieres Drive ahora, puedes ignorar este paso. Recibirás los archivos igualmente con enlaces directos.`,
+          { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
+        );
+      } else {
+        await ctx.editMessageText(
+          `🎉 <b>¡Registro completado, ${displayName}!</b>\n\n` +
+            `✅ En los próximos minutos comenzarás a recibir tus notificaciones de TEC Digital aquí en Telegram.\n\n` +
+            `─────────────────────\n` +
+            `<b>Comandos disponibles:</b>\n` +
+            `/estado — Ver el estado de tu cuenta\n` +
+            `/cancelar — Reiniciar el registro`,
+          { parse_mode: 'HTML' },
+        );
+      }
+    })
+    .row()
+    .text('❌ No, cancelar y volver a empezar', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      await upsertPendingRegistration(chatId);
+      await ctx.editMessageText('🔄 Registro cancelado.');
+      await ctx.reply(
+        'Empecemos de nuevo.\n\n' +
+          '📧 <b>Paso 1 de 3</b>\n' +
+          '¿Cuál es tu correo institucional del TEC?',
+        { parse_mode: 'HTML' },
+      );
+    });
+
+  // Drive Skip Menu
+  const skipDriveMenu = new Menu<BotContext>('skip-drive-menu').text(
+    '⏭️ Omitir (No usar Google Drive)',
+    async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      await advancePendingRegistration(chatId, 'awaiting_confirmation', {
+        drive_folder_id: null,
+      });
+
+      const reg = await getPendingRegistration(chatId);
+
+      await ctx.editMessageText(
+        `📋 <b>Resumen de tu registro</b>\n\n` +
+          `📧 <b>Correo TEC:</b> <code>${reg?.tec_username ?? '?'}</code>\n` +
+          `🔑 <b>Contraseña:</b> <code>••••••••</code> (cifrada)\n` +
+          `📁 <b>Carpeta Drive:</b> ❌ Sin Drive (solo Telegram)\n\n` +
+          `─────────────────────\n` +
+          `¿Todo está bien?`,
+        { parse_mode: 'HTML', reply_markup: confirmMenu },
+      );
+    },
+  );
+
+  const updateMenu = new Menu<BotContext>('update-menu')
+    .text('🔐 Credenciales TEC', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      await upsertPendingRegistrationWithStep(chatId, 'update_awaiting_username');
+      await ctx.editMessageText(
+        `🔄 <b>Actualización de Credenciales</b>\n\n` +
+          `¿Cuál es tu nuevo correo institucional del TEC?\n\n` +
+          `<i>Ejemplo: tu.nombre@estudiantec.cr</i>`,
+        { parse_mode: 'HTML' },
+      );
+    })
+    .row()
+    .text('📁 Carpeta Drive', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      await upsertPendingRegistrationWithStep(chatId, 'update_awaiting_drive');
+      await ctx.editMessageText(
+        `📁 <b>Actualización de Carpeta Drive</b>\n\n` +
+          `Por favor, envía el nuevo ID o enlace de la carpeta de Google Drive que deseas usar.\n` +
+          `Si deseas dejar de usar Drive, envía la palabra <b>"no"</b>.`,
+        { parse_mode: 'HTML' },
+      );
+    })
+    .row()
+    .text('🔄 Actualizar Todo', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      await upsertPendingRegistrationWithStep(chatId, 'awaiting_username');
+      await ctx.editMessageText(
+        `🔄 <b>Actualización Completa</b>\n\n` +
+          `Vamos a actualizar todos tus datos.\n\n` +
+          `📧 <b>Paso 1 de 3</b>\n` +
+          `¿Cuál es tu correo institucional del TEC?\n\n` +
+          `<i>Ejemplo: tu.nombre@estudiantec.cr</i>`,
+        { parse_mode: 'HTML' },
+      );
+    });
+
+  bot.use(confirmMenu);
+  bot.use(skipDriveMenu);
+  bot.use(updateMenu);
+
+  // ─── /start ─────────────────────────────────────────────────────────────────
+
+  bot.command('start', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    const existingUser = await getUserByTelegramChatId(chatId);
+
+    if (existingUser) {
+      await ctx.reply(
+        `👋 ¡Hola de nuevo, <b>${existingUser.name}</b>!\n\n` +
+          `Veo que ya estás registrado en el sistema con el correo <code>${existingUser.tec_username}</code>.\n\n` +
+          `Si deseas actualizar tu contraseña o tu carpeta de Google Drive, envía el comando /actualizar.`,
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    await upsertPendingRegistration(chatId);
+
+    await ctx.reply(
+      `👋 ¡Hola! Soy el <b>TEC Brain Bot</b>.\n\n` +
+        `Te voy a configurar para recibir las notificaciones de <b>TEC Digital</b> directamente aquí en Telegram.\n\n` +
+        `Este proceso toma menos de 2 minutos.\n\n` +
+        `─────────────────────\n` +
+        `📧 <b>Paso 1 de 3</b>\n` +
+        `¿Cuál es tu correo institucional del TEC?\n\n` +
+        `<i>Ejemplo: tu.nombre@estudiantec.cr</i>`,
+      { parse_mode: 'HTML' },
+    );
+    logger.info({ chatId }, '/start — registration reset, awaiting_username');
+  });
+
+  // ─── /actualizar ────────────────────────────────────────────────────────────
+
+  bot.command('actualizar', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    const existingUser = await getUserByTelegramChatId(chatId);
+
+    if (!existingUser) {
+      await ctx.reply('❌ No tienes una cuenta registrada. Envía /start para comenzar.');
+      return;
+    }
+
+    await ctx.reply(
+      `🔄 <b>Opciones de Actualización</b>\n\n` + `Selecciona qué deseas actualizar:`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: updateMenu,
+      },
+    );
+    logger.info({ chatId }, '/actualizar — showing update menu');
+  });
+
+  // ─── /cancelar ──────────────────────────────────────────────────────────────
+
+  bot.command('cancelar', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    await deletePendingRegistration(chatId);
+    await ctx.reply('❌ Registro cancelado. Envía /start cuando quieras intentarlo de nuevo.', {
+      parse_mode: 'HTML',
+    });
+  });
+
+  // ─── /estado ────────────────────────────────────────────────────────────────
+
+  bot.command('estado', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    const pending = await getPendingRegistration(chatId);
+
+    if (!pending || pending.step === 'done') {
+      await ctx.reply(
+        '✅ Ya estás registrado y recibiendo notificaciones.\n\n' +
+          'Si necesitas actualizar tus datos, envía /actualizar para modificar tu configuración.',
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    const stepLabels: Record<RegistrationStep, string> = {
+      awaiting_username: 'Esperando tu correo del TEC',
+      awaiting_password: 'Esperando tu contraseña del TEC',
+      awaiting_drive_folder: 'Esperando la carpeta de Google Drive',
+      awaiting_confirmation: 'Esperando confirmación final',
+      done: 'Registro completado',
+      update_awaiting_username: 'Actualizando tu correo del TEC',
+      update_awaiting_password: 'Actualizando tu contraseña del TEC',
+      update_awaiting_drive: 'Actualizando la carpeta de Google Drive',
+    };
+
+    await ctx.reply(
+      `🔄 Tienes un registro en progreso.\n\n` +
+        `<b>Estado actual:</b> ${stepLabels[pending.step]}\n\n` +
+        `Continúa respondiendo a las preguntas anteriores, o envía /cancelar para empezar de nuevo.`,
+      { parse_mode: 'HTML' },
+    );
+  });
+
+  // ─── Message handler — main conversation flow ──────────────────────────────
+
+  bot.on('message:text', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    const text = ctx.message.text.trim();
+
+    // Ignore commands (already handled above)
+    if (text.startsWith('/')) return;
+
+    const pending = await getPendingRegistration(chatId);
+
+    if (!pending || pending.step === 'done') {
+      await ctx.reply('Envía /start para registrarte y comenzar a recibir notificaciones del TEC.');
+      return;
+    }
+
+    // ── Step 1: TEC username ──────────────────────────────────────────────────
+    if (pending.step === 'awaiting_username' || pending.step === 'update_awaiting_username') {
+      const email = text.toLowerCase().trim();
+
+      if (!isTecEmail(email)) {
+        await ctx.reply(
+          '⚠️ Ese no parece ser un correo institucional del TEC.\n\n' +
+            'Debe terminar en <code>@estudiantec.cr</code>.\n\n' +
+            '<i>Ejemplo: juan.perez.1@estudiantec.cr</i>',
+          { parse_mode: 'HTML' },
+        );
+        return;
+      }
+
+      const userWithEmail = await getUserByTecUsername(email);
+      if (userWithEmail && userWithEmail.telegram_chat_id !== chatId) {
+        await ctx.reply(
+          '⚠️ Este correo ya está registrado por otro usuario.\n\n' +
+            'Si es tuyo y quieres moverlo aquí, contacta al administrador.',
+        );
+        return;
+      }
+
+      const nextStep =
+        pending.step === 'update_awaiting_username'
+          ? 'update_awaiting_password'
+          : 'awaiting_password';
+
+      await advancePendingRegistration(chatId, nextStep, {
+        tec_username: email,
+      });
+
+      await ctx.reply(
+        `✅ Correo guardado: <code>${email}</code>\n\n` +
+          `─────────────────────\n` +
+          `🔑 <b>Paso 2</b>\n` +
+          `¿Cuál es tu contraseña del TEC Digital?\n\n` +
+          `<i>🔒 Se guardará cifrada y el bot la borrará de este chat inmediatamente por seguridad.</i>\n\n` +
+          `⚠️ <b>Después de que la envíes, borra el mensaje</b> por seguridad.`,
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    // ── Step 2: TEC password ──────────────────────────────────────────────────
+    if (pending.step === 'awaiting_password' || pending.step === 'update_awaiting_password') {
+      if (text.length < 4) {
+        await ctx.reply('⚠️ La contraseña parece muy corta. Inténtalo de nuevo.');
+        return;
+      }
+
+      const encryptedPwd = encrypt(text);
+
+      if (pending.step === 'update_awaiting_password') {
+        // Just update the credentials and finish
+        const userWithEmail = await getUserByTelegramChatId(chatId);
+        if (!userWithEmail) {
+          // Fallback in case user does not exist
+          await ctx.reply('❌ No se encontró tu usuario. Por favor, empieza con /start.');
+          return;
+        }
+
+        const emailToSave = pending.tec_username ?? userWithEmail.tec_username;
+        await updateUserCredentials(chatId, emailToSave, encryptedPwd);
+        await deletePendingRegistration(chatId);
+
+        await ctx.reply(
+          `✅ <b>Credenciales actualizadas correctamente.</b>\n\n` +
+            `A partir de ahora usaré tus nuevas credenciales para obtener notificaciones.`,
+          { parse_mode: 'HTML' },
+        );
+        return;
+      }
+
+      await advancePendingRegistration(chatId, 'awaiting_drive_folder', {
+        tec_password_enc: encryptedPwd,
+      });
+
+      await ctx.reply(
+        `✅ Contraseña guardada de forma segura.\n\n` +
+          `─────────────────────\n` +
+          `📁 <b>Paso 3 de 3</b>\n` +
+          `¿Quieres que el bot suba tus archivos y documentos a <b>Google Drive</b>?\n\n` +
+          `Si <b>sí</b>:\n` +
+          `1. Abre Google Drive y crea una carpeta (ej: <i>"Universidad"</i>).\n` +
+          `2. Entra a esa carpeta y copia el <b>ID</b> que aparece en la URL:\n` +
+          `   <code>drive.google.com/drive/folders/<b>ESTE_ES_EL_ID</b></code>\n` +
+          `3. Pégalo aquí en el chat.\n\n` +
+          `Si <b>no</b> quieres usar Drive, presiona el botón de abajo:`,
+        { parse_mode: 'HTML', reply_markup: skipDriveMenu },
+      );
+      return;
+    }
+
+    // ── Step 3: Drive folder ──────────────────────────────────────────────────
+    if (pending.step === 'awaiting_drive_folder' || pending.step === 'update_awaiting_drive') {
+      let folderId: string | null = null;
+
+      if (text.toLowerCase() !== 'no') {
+        folderId = parseDriveFolderId(text);
+        if (!folderId) {
+          await ctx.reply(
+            '⚠️ No pude identificar un ID de carpeta de Google Drive en lo que enviaste.\n\n' +
+              '• Copia el ID directamente de la URL de Drive:\n' +
+              '  <code>drive.google.com/drive/folders/<b>1AbcXyz...</b></code>\n\n' +
+              '• O presiona el botón para omitir Drive.',
+            {
+              parse_mode: 'HTML',
+              reply_markup: pending.step === 'awaiting_drive_folder' ? skipDriveMenu : undefined,
+            },
+          );
+          return;
+        }
+      }
+
+      if (pending.step === 'update_awaiting_drive') {
+        // Just update the drive folder and finish
+        const userWithEmail = await getUserByTelegramChatId(chatId);
+        if (!userWithEmail) {
+          await ctx.reply('❌ No se encontró tu usuario. Por favor, empieza con /start.');
+          return;
+        }
+
+        await updateUserDriveFolder(chatId, folderId);
+        await deletePendingRegistration(chatId);
+
+        const driveText = folderId
+          ? `✅ ID: <code>${folderId}</code>`
+          : '❌ Sin Drive (solo Telegram)';
+        let authMessage = '';
+
+        if (folderId) {
+          const driveUrl = await buildDriveAuthUrl(userWithEmail.id);
+          authMessage =
+            `\n\n⚠️ <b>¡Importante!</b> Debes volver a autorizar tu cuenta de Google Drive para la nueva carpeta.\n\n` +
+            `👉 <a href="${driveUrl.replace(/&/g, '&amp;')}">Toca aquí para autorizar Google Drive</a>`;
+        }
+
+        await ctx.reply(
+          `✅ <b>Carpeta de Drive actualizada.</b>\n\n` +
+            `📁 <b>Nueva Carpeta:</b> ${driveText}${authMessage}`,
+          { parse_mode: 'HTML' },
+        );
+        return;
+      }
+
+      await advancePendingRegistration(chatId, 'awaiting_confirmation', {
+        drive_folder_id: folderId,
+      });
+
+      // Re-fetch to get all data for the summary
+      const reg = await getPendingRegistration(chatId);
+      const driveText = folderId ? `✅ <code>${folderId}</code>` : '❌ Sin Drive (solo Telegram)';
+
+      await ctx.reply(
+        `📋 <b>Resumen de tu registro</b>\n\n` +
+          `📧 <b>Correo TEC:</b> <code>${reg?.tec_username ?? '?'}</code>\n` +
+          `🔑 <b>Contraseña:</b> <code>••••••••</code> (cifrada)\n` +
+          `📁 <b>Carpeta Drive:</b> ${driveText}\n\n` +
+          `─────────────────────\n` +
+          `¿Todo está bien?`,
+        { parse_mode: 'HTML', reply_markup: confirmMenu },
+      );
+      return;
+    }
+
+    // ── Step 4: Confirmation (fallback if typed) ──────────────────────────────
+    if (pending.step === 'awaiting_confirmation') {
+      await ctx.reply(
+        'Por favor, usa los botones de arriba para confirmar o cancelar el registro.',
+        {
+          reply_markup: confirmMenu,
+        },
+      );
+      return;
+    }
+  });
+
+  // ─── Error handler ──────────────────────────────────────────────────────────
+
+  bot.catch((err) => {
+    const ctx = err.ctx;
+    const update = { ...ctx.update } as any;
+
+    // Prevent logging passwords in plaintext
+    if (update.message?.text) {
+      update.message.text = '[REDACTED_FOR_SECURITY]';
+    }
+
+    logger.error({ err: err.error, update }, 'Bot error');
+  });
+
+  // ─── Register commands & start polling ─────────────────────────────────────
 
   logger.info('Registering bot commands with Telegram');
   await bot.api.setMyCommands([
@@ -580,13 +590,39 @@ async function main() {
   ]);
 
   logger.info('Starting bot (long polling)');
-  // Start long-polling — grammY handles reconnects automatically
+  // drop_pending_updates: kills any lingering getUpdates session before we start ours.
+  // This is safe — we only call this once per fresh bot instance.
   await bot.start({
+    drop_pending_updates: true,
     onStart: (info) => logger.info({ username: info.username }, 'Bot is running'),
   });
 }
 
-main().catch((err: unknown) => {
-  logger.fatal({ err }, 'Fatal bot startup error');
+async function mainWithRetry() {
+  const MAX_RETRIES = 5;
+  const RETRY_DELAY_MS = 15_000;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await main();
+      return;
+    } catch (err: unknown) {
+      const is409 =
+        err instanceof Error && (err.message.includes('409') || err.message.includes('Conflict'));
+      if (is409 && attempt < MAX_RETRIES) {
+        logger.warn(
+          { attempt, nextAttemptInMs: RETRY_DELAY_MS },
+          'Bot conflict (409) — retrying after delay...',
+        );
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        // Loop back — a new bot instance is created at the top of main()
+      } else {
+        logger.fatal({ err }, 'Fatal bot startup error');
+        process.exit(1);
+      }
+    }
+  }
+  logger.fatal('Exceeded max retries for bot startup');
   process.exit(1);
-});
+}
+
+mainWithRetry();
