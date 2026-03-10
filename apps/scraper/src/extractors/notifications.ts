@@ -98,8 +98,9 @@ export async function processNotificationsSequentially(
   cookies: { name: string; value: string; domain?: string; path?: string }[],
   keywords: string[] = [],
   dispatchSecret: string = '',
-): Promise<void> {
+): Promise<'ok' | 'invalid_session'> {
   const metrics: MetricStore = {};
+  let result: 'ok' | 'invalid_session' = 'ok';
   try {
     extractorLogger.info({ userId }, 'Starting sequential notification processing');
     await requestWithRetry(
@@ -126,11 +127,16 @@ export async function processNotificationsSequentially(
     );
 
     if (notifRes.status !== 200 || !Array.isArray(notifRes.data?.notifications)) {
+      const contentType = (notifRes.headers?.['content-type'] as string | undefined) ?? 'unknown';
+      const rawPayload =
+        typeof notifRes.data === 'string' ? notifRes.data : JSON.stringify(notifRes.data);
+      const preview = rawPayload?.slice(0, 300);
       extractorLogger.warn(
-        { userId, status: notifRes.status },
+        { userId, status: notifRes.status, contentType, preview },
         'Could not retrieve notifications via API',
       );
-      return;
+      result = 'invalid_session';
+      return result;
     }
 
     const items = notifRes.data.notifications as TecNotificationItem[];
@@ -197,6 +203,8 @@ export async function processNotificationsSequentially(
   } finally {
     logMetrics('processNotificationsSequentially', metrics, { userId });
   }
+
+  return result;
 }
 
 /**

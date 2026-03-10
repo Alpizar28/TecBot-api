@@ -64,9 +64,9 @@ export function buildServer(): FastifyInstance {
 
       try {
         const client = await sessionManager.getClient(username, password);
-        const cookies = await sessionManager.getCookies(client);
+        let cookies = await sessionManager.getCookies(client);
 
-        await processNotificationsSequentially(
+        const initialStatus = await processNotificationsSequentially(
           client,
           userId,
           dispatchUrl,
@@ -74,6 +74,26 @@ export function buildServer(): FastifyInstance {
           keywords,
           dispatchSecret,
         );
+
+        if (initialStatus === 'invalid_session') {
+          request.log.warn({ userId }, 'Invalid session detected, re-authenticating');
+          client.jar.removeAllCookiesSync();
+          await sessionManager.login(client, username, password);
+          cookies = await sessionManager.getCookies(client);
+
+          const retryStatus = await processNotificationsSequentially(
+            client,
+            userId,
+            dispatchUrl,
+            cookies,
+            keywords,
+            dispatchSecret,
+          );
+
+          if (retryStatus === 'invalid_session') {
+            throw new Error('Session invalid after re-authentication');
+          }
+        }
 
         return reply.send({
           status: 'success',
