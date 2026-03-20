@@ -26,6 +26,8 @@ export interface DispatchResult {
 
 /** Regex to detect a bare course code like "FI2207" */
 const COURSE_CODE_RE = /^[A-Z]{2,4}\d{3,4}$/i;
+const DRIVE_AUTH_ALERT_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+const driveAlertTimestamps = new Map<string, number>();
 
 /**
  * Resolves the best available course name for folder creation:
@@ -179,8 +181,7 @@ async function handleDocumentNotification(
 ): Promise<boolean> {
   if (drive && user.drive_root_folder_id && notification.files && notification.files.length > 0) {
     const resolvedCourse = await resolveCourseNameForDrive(notification.course, notification.link);
-    const userFolderId = await drive.ensureFolder(user.name, user.drive_root_folder_id);
-    const courseFolderId = await drive.ensureFolder(resolvedCourse, userFolderId);
+    const courseFolderId = await drive.ensureFolder(resolvedCourse, user.drive_root_folder_id);
 
     const results = await Promise.all(
       notification.files.map(async (file) => {
@@ -233,6 +234,9 @@ async function handleDocumentNotification(
           return notified;
         } catch (error) {
           logStructuredError(user, notification, 'drive_upload', error);
+          if (isDriveAuthError(error)) {
+            await maybeNotifyDriveAuthExpiration(user, telegram, log);
+          }
           const notified = await safeTelegram(
             user,
             notification,
@@ -283,6 +287,66 @@ async function handleDocumentNotification(
     () => telegram.sendDocumentLink(user, notification),
     'telegram_doc_link',
   );
+}
+
+function isDriveAuthError(err: unknown): boolean {
+  if (!err) return false;
+
+  const message = err instanceof Error ? err.message.toLowerCase() : '';
+  if (message.includes('invalid_grant') || message.includes('needs_browser')) {
+    return true;
+  }
+
+  if (axios.isAxiosError(err)) {
+    const status = err.response?.status;
+    if (status === 401 || status === 403) {
+      const data = err.response?.data as { error?: string; error_description?: string } | undefined;
+      const dataMsg = `${data?.error ?? ''} ${data?.error_description ?? ''}`.toLowerCase();
+      if (dataMsg.includes('invalid_grant') || dataMsg.includes('unauthorized')) {
+        return true;
+      }
+    }
+  }
+
+  const errors = (err as { errors?: Array<{ reason?: string }> })?.errors;
+  if (Array.isArray(errors)) {
+    return errors.some(
+      (item) =>
+        (item.reason ?? '').toLowerCase().includes('auth') ||
+        (item.reason ?? '').toLowerCase().includes('forbidden'),
+    );
+  }
+
+  return false;
+}
+
+async function maybeNotifyDriveAuthExpiration(
+  user: User,
+  telegram: TelegramService,
+  log: LoggerLike,
+): Promise<void> {
+  const lastAlert = driveAlertTimestamps.get(user.id) ?? 0;
+  const now = Date.now();
+  if (now - lastAlert < DRIVE_AUTH_ALERT_COOLDOWN_MS) {
+    log.info({ userId: user.id }, 'Drive auth alert skipped due to cooldown');
+    return;
+  }
+
+  try {
+    await telegram.sendDriveAuthExpired(user);
+    driveAlertTimestamps.set(user.id, now);
+    log.warn({ userId: user.id }, 'Drive authorization expired. Renewal reminder sent');
+  } catch (error) {
+    logger.warn(
+      {
+        component: 'dispatcher',
+        userId: user.id,
+        action: 'drive_auth_alert',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      },
+      'Failed to send Drive auth renewal reminder',
+    );
+  }
 }
 
 function logStructuredError(

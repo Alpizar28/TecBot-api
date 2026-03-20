@@ -67,6 +67,14 @@ function formatDocumentLink(user: User, n: RawNotification): string {
   ].join('\n');
 }
 
+function formatDriveAuthExpired(user: User): string {
+  return [
+    '<b>Atención: autoriza Drive de nuevo</b>',
+    'Tu sesión de Google Drive expiró y no podemos guardar documentos.',
+    'Abre el bot TecBrain y usa /actualizar para volver a enlazar tu cuenta.',
+  ].join('\n');
+}
+
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -127,5 +135,9 @@ export class TelegramService {
 
   async sendDocumentLink(user: User, n: RawNotification): Promise<void> {
     await this.sendMessage(user.telegram_chat_id, formatDocumentLink(user, n));
+  }
+
+  async sendDriveAuthExpired(user: User): Promise<void> {
+    await this.sendMessage(user.telegram_chat_id, formatDriveAuthExpired(user));
   }
 }

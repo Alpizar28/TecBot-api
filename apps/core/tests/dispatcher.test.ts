@@ -7,6 +7,8 @@ const db = {
   updateNotificationDocumentStatus: vi.fn(),
   uploadedFileExists: vi.fn(),
   insertUploadedFile: vi.fn(),
+  upsertCourseMapping: vi.fn().mockResolvedValue(undefined),
+  getCourseMapping: vi.fn().mockResolvedValue(null),
 };
 
 vi.mock('@tec-brain/database', () => db);
@@ -44,7 +46,8 @@ describe('dispatch()', () => {
     const result = await dispatch(
       user,
       notification,
-      [],
+      'http://scraper',
+      'password',
       {
         sendNotice: vi.fn(),
         sendEvaluation: vi.fn(),
@@ -65,7 +68,8 @@ describe('dispatch()', () => {
     const result = await dispatch(
       user,
       notification,
-      [],
+      'http://scraper',
+      'password',
       {
         sendNotice: vi.fn().mockRejectedValue(new Error('telegram down')),
         sendEvaluation: vi.fn(),
@@ -77,5 +81,46 @@ describe('dispatch()', () => {
 
     expect(result).toEqual({ processed: false, reason: 'partial_or_failed' });
     expect(db.insertNotification).not.toHaveBeenCalled();
+  });
+
+  it('notifies user when drive auth expires during upload', async () => {
+    const userWithDrive: User = {
+      ...user,
+      drive_root_folder_id: 'root123',
+    };
+
+    const docNotification: RawNotification = {
+      ...notification,
+      type: 'documento',
+      files: [
+        {
+          file_name: 'archivo.pdf',
+          download_url: 'https://tecdigital.tec.ac.cr/file.pdf',
+        },
+      ],
+    } as RawNotification;
+
+    db.getNotificationState.mockResolvedValue({ exists: false, document_status: null });
+    db.uploadedFileExists.mockResolvedValue(false);
+    db.insertUploadedFile.mockResolvedValue(undefined);
+
+    const telegram = {
+      sendNotice: vi.fn(),
+      sendEvaluation: vi.fn(),
+      sendDocumentSaved: vi.fn(),
+      sendDocumentDownload: vi.fn().mockResolvedValue(undefined),
+      sendDocumentLink: vi.fn(),
+      sendDriveAuthExpired: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const drive = {
+      ensureFolder: vi.fn().mockResolvedValue('folder123'),
+      downloadAndUpload: vi.fn().mockRejectedValue(new Error('invalid_grant')),
+    } as any;
+
+    const { dispatch } = await import('../src/dispatcher.js');
+    await dispatch(userWithDrive, docNotification, 'http://scraper', '', telegram, drive);
+
+    expect(telegram.sendDriveAuthExpired).toHaveBeenCalledTimes(1);
   });
 });

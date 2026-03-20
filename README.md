@@ -59,6 +59,7 @@ cp .env.example .env
 ```
 
 Variables clave:
+
 - `DATABASE_URL`
 - `POSTGRES_PASSWORD`
 - `DB_ENCRYPTION_KEY`
@@ -85,10 +86,12 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 El proyecto soporta dos modos:
 
 #### Opción A: OAuth (recomendado para Drive personal)
+
 - `credentials.json` con OAuth Client (`installed` o `web`)
 - `token.json` con refresh token en la misma carpeta (o usar `GOOGLE_DRIVE_TOKEN_PATH`)
 
 #### Opción B: Service Account
+
 - `credentials.json` tipo `service_account`
 - Requiere usar carpeta compartida/Shared Drive o permisos adecuados
 
@@ -101,6 +104,7 @@ docker compose -f infra/docker-compose.yml up -d --build
 ```
 
 Servicios:
+
 - `db` -> PostgreSQL (`:5432`)
 - `scraper` -> API scraper (`:3001`)
 - `core` -> Orquestador + API (`:3002`)
@@ -118,10 +122,12 @@ pnpm dev:core
 ## Endpoints
 
 ### Core (`apps/core`)
+
 - `GET /health`
 - `POST /api/run-now` -> dispara una corrida manual
 
 ### Scraper (`apps/scraper`)
+
 - `GET /health`
 - `POST /process-sequential/:userId`
 
@@ -140,24 +146,29 @@ pnpm add-user "Nombre" "correo@estudiantec.cr" "passwordTEC" "telegram_chat_id" 
 ```
 
 Qué hace:
+
 - cifra la contraseña del TEC (AES-256-CBC)
 - inserta usuario nuevo o actualiza uno existente por `tec_username`
 
 ## Estructura de datos en Drive
 
-Bajo `drive_root_folder_id`, el sistema organiza:
+Bajo `drive_root_folder_id`, cada curso se crea directamente como subcarpeta:
 
 ```text
 <Drive Root>
-└── <Nombre del usuario>
-    └── <Nombre completo del curso>
-        ├── archivo1.pdf
-        └── archivo2.pdf
+└── <Nombre completo del curso>
+    ├── archivo1.pdf
+    └── archivo2.pdf
 ```
+
+### Renovación de permisos
+
+Si Google Drive devuelve `invalid_grant`/401 (token caducado), TecBrain envía un mensaje por Telegram pidiendo ejecutar `/actualizar` para reautorizar la cuenta. Mientras tanto, los documentos siguen llegando por Telegram como fallback.
 
 ## Telegram (formato actual)
 
 Mensajes minimalistas:
+
 - curso (negrita)
 - descripción o nombre del archivo
 - link corto
@@ -181,6 +192,7 @@ docker logs -f tec-brain-scraper
 ```
 
 El core también registra:
+
 - métricas por endpoint (`Endpoint metrics`)
 - métricas por ciclo (`Cycle metrics`)
 - alertas automáticas cuando se superan umbrales (`Automatic cycle alerts triggered`)
@@ -201,6 +213,7 @@ pnpm format
 ```
 
 El script hace:
+
 - `git pull origin main`
 - `docker compose -f infra/docker-compose.yml up -d --build`
 - stream de logs de `core`
@@ -208,6 +221,7 @@ El script hace:
 ## Documentación de estado del proyecto
 
 Ver reporte amplio en:
+
 - `docs/status/PROJECT_STATUS.md`
 
 ## Limitaciones conocidas
