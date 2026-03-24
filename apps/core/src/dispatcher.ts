@@ -268,15 +268,31 @@ async function handleDocumentNotification(
 
   if (notification.files && notification.files.length > 0) {
     const results = await Promise.all(
-      notification.files.map((file) =>
-        safeTelegram(
+      notification.files.map(async (file) => {
+        const sent = await safeTelegram(
           user,
           notification,
           () =>
             telegram.sendDocumentDownload(user, notification, file.file_name, file.download_url),
           'telegram_doc_download',
-        ),
-      ),
+        );
+
+        if (sent) {
+          const fileHash = crypto
+            .createHash('sha256')
+            .update(file.download_url + file.file_name)
+            .digest('hex');
+          await insertUploadedFile(
+            user.id,
+            notification.course,
+            fileHash,
+            file.file_name,
+            'fallback',
+          );
+        }
+
+        return sent;
+      }),
     );
     return results.every(Boolean);
   }

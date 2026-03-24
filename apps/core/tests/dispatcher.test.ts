@@ -123,4 +123,41 @@ describe('dispatch()', () => {
 
     expect(telegram.sendDriveAuthExpired).toHaveBeenCalledTimes(1);
   });
+
+  it('marks document fallback when drive disabled', async () => {
+    const docNotification: RawNotification = {
+      ...notification,
+      type: 'documento',
+      files: [
+        {
+          file_name: 'archivo.pdf',
+          download_url: 'https://tecdigital.tec.ac.cr/file.pdf',
+        },
+      ],
+    } as RawNotification;
+
+    db.getNotificationState.mockResolvedValue({ exists: false, document_status: null });
+    db.uploadedFileExists.mockResolvedValue(false);
+
+    const telegram = {
+      sendNotice: vi.fn(),
+      sendEvaluation: vi.fn(),
+      sendDocumentSaved: vi.fn(),
+      sendDocumentDownload: vi.fn().mockResolvedValue(undefined),
+      sendDocumentLink: vi.fn(),
+      sendDriveAuthExpired: vi.fn(),
+    } as any;
+
+    const { dispatch } = await import('../src/dispatcher.js');
+    await dispatch(user, docNotification, 'http://scraper', '', telegram, null);
+
+    expect(db.insertUploadedFile).toHaveBeenCalledWith(
+      user.id,
+      docNotification.course,
+      expect.any(String),
+      'archivo.pdf',
+      'fallback',
+    );
+    expect(db.insertNotification).toHaveBeenCalled();
+  });
 });
