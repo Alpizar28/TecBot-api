@@ -11,6 +11,8 @@ export interface User {
   tec_password_enc: string;
   telegram_chat_id: string;
   drive_root_folder_id: string | null;
+  onedrive_root_folder_id: string | null;
+  storage_provider: 'drive' | 'onedrive' | 'none';
   is_active: boolean;
   created_at: Date;
 }

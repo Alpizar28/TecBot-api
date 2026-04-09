@@ -1,7 +1,22 @@
 import axios from 'axios';
-import { getActiveUsers, getUserById, getDriveOAuthToken, decrypt } from '@tec-brain/database';
+import {
+  getActiveUsers,
+  getUserById,
+  getDriveOAuthToken,
+  getOneDriveOAuthToken,
+  saveOneDriveOAuthToken,
+  encrypt,
+  decrypt,
+} from '@tec-brain/database';
 import { TelegramService } from '@tec-brain/telegram';
-import { DriveService, loadOAuthClientConfig, type OAuthClient } from '@tec-brain/drive';
+import {
+  DriveService,
+  OneDriveService,
+  loadOAuthClientConfig,
+  loadOneDriveOAuthConfig,
+  type OAuthClient,
+  type OneDriveOAuthClient,
+} from '@tec-brain/drive';
 import { dispatch, type DispatchResult } from './dispatcher.js';
 import pLimit from 'p-limit';
 import type { ScrapeResponse } from '@tec-brain/types';
@@ -32,6 +47,17 @@ if (process.env.GOOGLE_OAUTH_CLIENT_PATH) {
       'Google Drive OAuth client not loaded — Drive uploads disabled',
     );
   }
+}
+
+let onedriveClient: OneDriveOAuthClient | null = null;
+try {
+  onedriveClient = loadOneDriveOAuthConfig();
+  logger.info({ component: 'orchestrator' }, 'OneDrive OAuth client loaded');
+} catch (err) {
+  logger.warn(
+    { component: 'orchestrator', error: err instanceof Error ? err.message : String(err) },
+    'OneDrive OAuth client not loaded — OneDrive uploads disabled',
+  );
 }
 
 let running = false;
@@ -114,13 +140,13 @@ export async function handleInternalDispatch(
   if (!user) throw new Error('User not found');
 
   // Build a per-user DriveService from their stored OAuth token
-  let drive: DriveService | null = null;
-  if (oauthClient && user.drive_root_folder_id) {
+  let storage: DriveService | OneDriveService | null = null;
+  if (user.storage_provider === 'drive' && oauthClient && user.drive_root_folder_id) {
     try {
       const encToken = await getDriveOAuthToken(userId);
       if (encToken) {
         const tokenJson = decrypt(encToken);
-        drive = DriveService.fromOAuthToken(oauthClient, tokenJson);
+        storage = DriveService.fromOAuthToken(oauthClient, tokenJson);
       } else {
         logger.info(
           { component: 'orchestrator', userId },
@@ -139,7 +165,40 @@ export async function handleInternalDispatch(
     }
   }
 
-  return dispatch(user, notification, SCRAPER_URL, decrypt(user.tec_password_enc), telegram, drive);
+  if (user.storage_provider === 'onedrive' && onedriveClient && user.onedrive_root_folder_id) {
+    try {
+      const encToken = await getOneDriveOAuthToken(userId);
+      if (encToken) {
+        const tokenJson = decrypt(encToken);
+        storage = OneDriveService.fromOAuthToken(onedriveClient, tokenJson, async (json) => {
+          await saveOneDriveOAuthToken(userId, encrypt(json));
+        });
+      } else {
+        logger.info(
+          { component: 'orchestrator', userId },
+          'No OneDrive OAuth token for user — OneDrive uploads skipped',
+        );
+      }
+    } catch (err) {
+      logger.warn(
+        {
+          component: 'orchestrator',
+          userId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to load OneDrive OAuth token — OneDrive uploads skipped',
+      );
+    }
+  }
+
+  return dispatch(
+    user,
+    notification,
+    SCRAPER_URL,
+    decrypt(user.tec_password_enc),
+    telegram,
+    storage,
+  );
 }
 
 async function processUser(

@@ -17,6 +17,8 @@ import {
   createOAuthState,
   updateUserCredentials,
   updateUserDriveFolder,
+  updateUserOneDriveFolder,
+  updateUserStorageProvider,
   listUserNotificationCourses,
   listUserCourseFilters,
   muteUserCourse,
@@ -24,7 +26,14 @@ import {
   resolveCourseEntry,
   type RegistrationStep,
 } from '@tec-brain/database';
-import { loadOAuthClientConfig, getAuthorizationUrl, type OAuthClient } from '@tec-brain/drive';
+import {
+  loadOAuthClientConfig,
+  loadOneDriveOAuthConfig,
+  getAuthorizationUrl,
+  getOneDriveAuthorizationUrl,
+  type OAuthClient,
+  type OneDriveOAuthClient,
+} from '@tec-brain/drive';
 
 // ─── Logger ───────────────────────────────────────────────────────────────────
 
@@ -84,6 +93,10 @@ function parseDriveFolderId(input: string): string | null {
 /** Validates a TEC email address. */
 function isTecEmail(value: string): boolean {
   return /^[a-zA-Z0-9._%+-]+@(estudiantec\.cr|itcr\.ac\.cr|tec\.ac\.cr)$/i.test(value.trim());
+}
+
+function isValidOneDriveFolderId(value: string): boolean {
+  return value.trim().length >= 6 && !value.trim().includes(' ');
 }
 
 interface CourseFilterEntry {
@@ -177,11 +190,25 @@ async function main() {
     }
   }
 
+  let onedriveClient: OneDriveOAuthClient | null = null;
+  try {
+    onedriveClient = loadOneDriveOAuthConfig();
+    logger.info('OneDrive OAuth client loaded — OneDrive auth available');
+  } catch (err) {
+    logger.warn({ err }, 'Could not load OneDrive OAuth client — OneDrive auth unavailable');
+  }
+
   /** Builds the Google Drive auth URL for a user and returns it. */
   async function buildDriveAuthUrl(userId: string): Promise<string> {
     if (!oauthClient) throw new Error('OAuth client not configured');
     const state = await createOAuthState(userId);
     return getAuthorizationUrl(oauthClient, state);
+  }
+
+  async function buildOneDriveAuthUrl(userId: string): Promise<string> {
+    if (!onedriveClient) throw new Error('OneDrive OAuth client not configured');
+    const state = await createOAuthState(userId);
+    return getOneDriveAuthorizationUrl(onedriveClient, state);
   }
 
   // ─── Bot setup — fresh instance every startup ──────────────────────────────
@@ -225,6 +252,7 @@ async function main() {
             tec_username: pending.tec_username,
             tec_password_enc: pending.tec_password_enc,
             drive_root_folder_id: pending.drive_folder_id ?? null,
+            storage_provider: pending.drive_folder_id ? 'drive' : 'none',
           });
         } else {
           // Brand new user
@@ -234,6 +262,7 @@ async function main() {
             tec_password_enc: pending.tec_password_enc,
             telegram_chat_id: chatId,
             drive_root_folder_id: pending.drive_folder_id ?? null,
+            storage_provider: pending.drive_folder_id ? 'drive' : 'none',
           });
         }
       } catch (err) {
@@ -362,9 +391,40 @@ async function main() {
       );
     });
 
+  const storageMenu = new Menu<BotContext>('storage-menu')
+    .text('📁 Google Drive', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      await upsertPendingRegistrationWithStep(chatId, 'storage_awaiting_drive_folder');
+      await ctx.editMessageText(
+        `📁 <b>Configurar Google Drive</b>\n\n` +
+          `Envíame el ID o enlace de la carpeta raíz de Google Drive que quieres usar.\n` +
+          `<i>Ejemplo: drive.google.com/drive/folders/1AbcXyz...</i>`,
+        { parse_mode: 'HTML' },
+      );
+    })
+    .row()
+    .text('☁️ OneDrive', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      await upsertPendingRegistrationWithStep(chatId, 'storage_awaiting_onedrive_folder');
+      await ctx.editMessageText(
+        `☁️ <b>Configurar OneDrive</b>\n\n` +
+          `Envíame el <b>ID</b> de la carpeta raíz de OneDrive que quieres usar.\n` +
+          `<i>Ejemplo: 01ABCDXYZ...</i>`,
+        { parse_mode: 'HTML' },
+      );
+    })
+    .row()
+    .text('🚫 Sin almacenamiento', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      await updateUserStorageProvider(chatId, 'none');
+      await deletePendingRegistration(chatId);
+      await ctx.editMessageText('✅ Almacenamiento desactivado. Solo recibirás Telegram.');
+    });
+
   bot.use(confirmMenu);
   bot.use(skipDriveMenu);
   bot.use(updateMenu);
+  bot.use(storageMenu);
 
   // ─── Filters Menu ──────────────────────────────────────────────────────────
 
@@ -516,9 +576,28 @@ async function main() {
     const pending = await getPendingRegistration(chatId);
 
     if (!pending || pending.step === 'done') {
+      const user = await getUserByTelegramChatId(chatId);
+      const providerLabel =
+        user?.storage_provider === 'drive'
+          ? 'Google Drive'
+          : user?.storage_provider === 'onedrive'
+            ? 'OneDrive'
+            : 'Sin almacenamiento';
+      const storageDetail =
+        user?.storage_provider === 'drive'
+          ? user.drive_root_folder_id
+            ? `\n📁 <b>Drive:</b> <code>${user.drive_root_folder_id}</code>`
+            : ''
+          : user?.storage_provider === 'onedrive'
+            ? user.onedrive_root_folder_id
+              ? `\n☁️ <b>OneDrive:</b> <code>${user.onedrive_root_folder_id}</code>`
+              : ''
+            : '';
       await ctx.reply(
         '✅ Ya estás registrado y recibiendo notificaciones.\n\n' +
-          'Si necesitas actualizar tus datos, envía /actualizar para modificar tu configuración.',
+          `📦 <b>Almacenamiento:</b> ${providerLabel}${storageDetail}\n\n` +
+          'Si necesitas actualizar tus datos, envía /actualizar para modificar tu configuración.\n' +
+          'Para cambiar almacenamiento, usa /almacenamiento.',
         { parse_mode: 'HTML' },
       );
       return;
@@ -533,6 +612,8 @@ async function main() {
       update_awaiting_username: 'Actualizando tu correo del TEC',
       update_awaiting_password: 'Actualizando tu contraseña del TEC',
       update_awaiting_drive: 'Actualizando la carpeta de Google Drive',
+      storage_awaiting_drive_folder: 'Configurando Google Drive',
+      storage_awaiting_onedrive_folder: 'Configurando OneDrive',
     };
 
     await ctx.reply(
@@ -540,6 +621,40 @@ async function main() {
         `<b>Estado actual:</b> ${stepLabels[pending.step]}\n\n` +
         `Continúa respondiendo a las preguntas anteriores, o envía /cancelar para empezar de nuevo.`,
       { parse_mode: 'HTML' },
+    );
+  });
+
+  // ─── /almacenamiento ───────────────────────────────────────────────────────
+
+  bot.command('almacenamiento', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    if (isRateLimited(chatId)) return;
+    const user = await getUserByTelegramChatId(chatId);
+
+    if (!user) {
+      await ctx.reply('❌ No tienes una cuenta registrada. Envía /start para comenzar.');
+      return;
+    }
+
+    const pending = await getPendingRegistration(chatId);
+    if (pending && pending.step !== 'done') {
+      await ctx.reply(
+        '⚠️ Tienes un registro en progreso. Completa ese flujo o envía /cancelar antes de cambiar almacenamiento.',
+      );
+      return;
+    }
+
+    const providerLabel =
+      user.storage_provider === 'drive'
+        ? 'Google Drive'
+        : user.storage_provider === 'onedrive'
+          ? 'OneDrive'
+          : 'Sin almacenamiento';
+
+    await ctx.reply(
+      `📦 <b>Almacenamiento actual:</b> ${providerLabel}\n\n` +
+        'Elige dónde quieres guardar los documentos:',
+      { parse_mode: 'HTML', reply_markup: storageMenu },
     );
   });
 
@@ -687,7 +802,11 @@ async function main() {
     }
 
     // ── Step 3: Drive folder ──────────────────────────────────────────────────
-    if (pending.step === 'awaiting_drive_folder' || pending.step === 'update_awaiting_drive') {
+    if (
+      pending.step === 'awaiting_drive_folder' ||
+      pending.step === 'update_awaiting_drive' ||
+      pending.step === 'storage_awaiting_drive_folder'
+    ) {
       let folderId: string | null = null;
 
       if (text.toLowerCase() !== 'no') {
@@ -707,7 +826,10 @@ async function main() {
         }
       }
 
-      if (pending.step === 'update_awaiting_drive') {
+      if (
+        pending.step === 'update_awaiting_drive' ||
+        pending.step === 'storage_awaiting_drive_folder'
+      ) {
         // Just update the drive folder and finish
         const userWithEmail = await getUserByTelegramChatId(chatId);
         if (!userWithEmail) {
@@ -716,6 +838,7 @@ async function main() {
         }
 
         await updateUserDriveFolder(chatId, folderId);
+        await updateUserStorageProvider(chatId, folderId ? 'drive' : 'none');
         await deletePendingRegistration(chatId);
 
         const driveText = folderId
@@ -724,10 +847,14 @@ async function main() {
         let authMessage = '';
 
         if (folderId) {
-          const driveUrl = await buildDriveAuthUrl(userWithEmail.id);
-          authMessage =
-            `\n\n⚠️ <b>¡Importante!</b> Debes volver a autorizar tu cuenta de Google Drive para la nueva carpeta.\n\n` +
-            `👉 <a href="${driveUrl.replace(/&/g, '&amp;')}">Toca aquí para autorizar Google Drive</a>`;
+          try {
+            const driveUrl = await buildDriveAuthUrl(userWithEmail.id);
+            authMessage =
+              `\n\n⚠️ <b>¡Importante!</b> Debes volver a autorizar tu cuenta de Google Drive para la nueva carpeta.\n\n` +
+              `👉 <a href="${driveUrl.replace(/&/g, '&amp;')}">Toca aquí para autorizar Google Drive</a>`;
+          } catch (err) {
+            authMessage = `\n\n⚠️ No pude generar el link de autorización de Drive. Contacta al administrador.`;
+          }
         }
 
         await ctx.reply(
@@ -754,6 +881,41 @@ async function main() {
           `─────────────────────\n` +
           `¿Todo está bien?`,
         { parse_mode: 'HTML', reply_markup: confirmMenu },
+      );
+      return;
+    }
+
+    if (pending.step === 'storage_awaiting_onedrive_folder') {
+      const folderId = text.trim();
+      if (!isValidOneDriveFolderId(folderId)) {
+        await ctx.reply(
+          '⚠️ Ese ID no parece válido. Copia el ID de carpeta de OneDrive y envíalo de nuevo.',
+        );
+        return;
+      }
+
+      const user = await getUserByTelegramChatId(chatId);
+      if (!user) {
+        await ctx.reply('❌ No se encontró tu usuario. Por favor, empieza con /start.');
+        return;
+      }
+
+      await updateUserOneDriveFolder(chatId, folderId);
+      await updateUserStorageProvider(chatId, 'onedrive');
+      await deletePendingRegistration(chatId);
+
+      let authMessage = '';
+      try {
+        const oneDriveUrl = await buildOneDriveAuthUrl(user.id);
+        authMessage = `\n\n👉 <a href="${oneDriveUrl.replace(/&/g, '&amp;')}">Toca aquí para autorizar OneDrive</a>`;
+      } catch (err) {
+        authMessage = `\n\n⚠️ No pude generar el link de autorización de OneDrive. Contacta al administrador.`;
+      }
+
+      await ctx.reply(
+        `✅ <b>OneDrive configurado.</b>\n\n` +
+          `☁️ <b>Carpeta:</b> <code>${folderId}</code>${authMessage}`,
+        { parse_mode: 'HTML' },
       );
       return;
     }
@@ -790,6 +952,7 @@ async function main() {
   await bot.api.setMyCommands([
     { command: 'start', description: 'Registrar tu cuenta en el bot' },
     { command: 'actualizar', description: 'Actualizar correo, contraseña o carpeta de Drive' },
+    { command: 'almacenamiento', description: 'Elegir Drive, OneDrive o ninguno' },
     { command: 'estado', description: 'Ver el estado de tu registro' },
     { command: 'filtros', description: 'Silenciar cursos o comunidades' },
     { command: 'cancelar', description: 'Cancelar el registro en progreso' },

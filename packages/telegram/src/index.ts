@@ -37,12 +37,14 @@ function formatDocumentSent(
   n: RawNotification,
   fileName: string,
   driveFileId: string,
+  fileUrl?: string,
 ): string {
-  const driveUrl = `https://drive.google.com/file/d/${encodeURIComponent(driveFileId)}/view`;
+  const driveUrl =
+    fileUrl ?? `https://drive.google.com/file/d/${encodeURIComponent(driveFileId)}/view`;
   return [
     `<b>${escapeHtml(n.course)}</b>`,
     escapeHtml(fileName),
-    `<a href="${driveUrl}">Abrir en Drive</a>`,
+    `<a href="${driveUrl}">Abrir archivo</a>`,
   ].join('\n');
 }
 
@@ -72,6 +74,14 @@ function formatDriveAuthExpired(user: User): string {
     '<b>Atención: autoriza Drive de nuevo</b>',
     'Tu sesión de Google Drive expiró y no podemos guardar documentos.',
     'Abre el bot TecBrain y usa /actualizar para volver a enlazar tu cuenta.',
+  ].join('\n');
+}
+
+function formatOneDriveAuthExpired(user: User): string {
+  return [
+    '<b>Atención: autoriza OneDrive de nuevo</b>',
+    'Tu sesión de OneDrive expiró y no podemos guardar documentos.',
+    'Abre el bot TecBrain y usa /almacenamiento para volver a enlazar tu cuenta.',
   ].join('\n');
 }
 
@@ -117,10 +127,11 @@ export class TelegramService {
     n: RawNotification,
     fileName: string,
     driveFileId: string,
+    fileUrl?: string,
   ): Promise<void> {
     await this.sendMessage(
       user.telegram_chat_id,
-      formatDocumentSent(user, n, fileName, driveFileId),
+      formatDocumentSent(user, n, fileName, driveFileId, fileUrl),
     );
   }
 
@@ -139,5 +150,9 @@ export class TelegramService {
 
   async sendDriveAuthExpired(user: User): Promise<void> {
     await this.sendMessage(user.telegram_chat_id, formatDriveAuthExpired(user));
+  }
+
+  async sendOneDriveAuthExpired(user: User): Promise<void> {
+    await this.sendMessage(user.telegram_chat_id, formatOneDriveAuthExpired(user));
   }
 }

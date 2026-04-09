@@ -6,6 +6,7 @@ import {
   getPool,
   runMigrations,
   saveDriveOAuthToken,
+  saveOneDriveOAuthToken,
   encrypt,
   createOAuthState,
   consumeOAuthState,
@@ -17,6 +18,9 @@ import {
   loadOAuthClientConfig,
   getAuthorizationUrl,
   exchangeCodeForTokens,
+  loadOneDriveOAuthConfig,
+  getOneDriveAuthorizationUrl,
+  exchangeOneDriveCodeForTokens,
 } from '@tec-brain/drive';
 import type { RawNotification, ScrapeResponse } from '@tec-brain/types';
 import { logger } from './logger.js';
@@ -47,6 +51,18 @@ async function main() {
         }
       })()
     : null;
+
+  const onedriveClient = (() => {
+    try {
+      return loadOneDriveOAuthConfig();
+    } catch (err) {
+      logger.warn(
+        { component: 'core_startup', error: String(err) },
+        'OneDrive OAuth config not loaded',
+      );
+      return null;
+    }
+  })();
 
   // 2. Start health check Fastify server
   const fastify = Fastify({ logger: { level: 'info' } });
@@ -166,6 +182,86 @@ async function main() {
     const authUrl = getAuthorizationUrl(oauthClient, state);
     return { authUrl };
   });
+
+  // ─── OneDrive OAuth flow ───────────────────────────────────────────────────
+  fastify.get<{ Querystring: { userId?: string } }>('/auth/onedrive', async (request, reply) => {
+    if (!onedriveClient) {
+      return reply
+        .status(503)
+        .send({ error: 'OAuth client not configured (ONEDRIVE_CLIENT_ID missing)' });
+    }
+    const { userId } = request.query;
+    if (!userId) return reply.status(400).send({ error: 'Missing userId query param' });
+
+    const state = await createOAuthState(userId);
+    const authUrl = getOneDriveAuthorizationUrl(onedriveClient, state);
+    return reply.redirect(authUrl);
+  });
+
+  fastify.get<{ Querystring: { code?: string; state?: string; error?: string } }>(
+    '/auth/onedrive/callback',
+    async (request, reply) => {
+      if (!onedriveClient) {
+        return reply.status(503).send({ error: 'OAuth client not configured' });
+      }
+      const { code, state, error } = request.query;
+      if (error) return reply.status(400).send({ error: `Microsoft returned: ${error}` });
+      if (!code || !state) return reply.status(400).send({ error: 'Missing code or state' });
+
+      let userId: string | null;
+      try {
+        userId = await consumeOAuthState(state);
+      } catch (err) {
+        return reply.status(500).send({ error: 'Database error validating state' });
+      }
+
+      if (!userId) {
+        return reply
+          .status(400)
+          .type('text/html')
+          .send(
+            `<html><body style="font-family:sans-serif;padding:2rem">
+            <h2>❌ Enlace expirado o inválido</h2>
+            <p>Este enlace de autorización ya fue usado o expiró (tienen validez de 10 minutos).</p>
+            <p>Por favor, solicita un nuevo enlace desde el bot de Telegram con el comando <b>/almacenamiento</b>.</p>
+            </body></html>`,
+          );
+      }
+
+      try {
+        const tokenJson = await exchangeOneDriveCodeForTokens(onedriveClient, code);
+        const encryptedToken = encrypt(tokenJson);
+        await saveOneDriveOAuthToken(userId, encryptedToken);
+        logger.info({ component: 'oauth', userId }, 'OneDrive OAuth token saved for user');
+        return reply.type('text/html').send(
+          `<html><body style="font-family:sans-serif;padding:2rem">
+                    <h2>✅ OneDrive autorizado correctamente</h2>
+                    <p>Ya puedes cerrar esta ventana. El bot comenzará a subir archivos a tu OneDrive.</p>
+                    </body></html>`,
+        );
+      } catch (err) {
+        logger.error(
+          { component: 'oauth', userId, error: String(err) },
+          'Failed to exchange OneDrive OAuth code',
+        );
+        return reply.status(500).send({ error: 'Token exchange failed', detail: String(err) });
+      }
+    },
+  );
+
+  fastify.get<{ Querystring: { userId?: string } }>(
+    '/auth/onedrive/url',
+    async (request, reply) => {
+      if (!onedriveClient) {
+        return reply.status(503).send({ error: 'OAuth client not configured' });
+      }
+      const { userId } = request.query;
+      if (!userId) return reply.status(400).send({ error: 'Missing userId query param' });
+      const state = await createOAuthState(userId);
+      const authUrl = getOneDriveAuthorizationUrl(onedriveClient, state);
+      return { authUrl };
+    },
+  );
 
   await fastify.listen({ port: PORT, host: '0.0.0.0' });
   logger.info({ component: 'core_startup', port: PORT }, 'Core listening');

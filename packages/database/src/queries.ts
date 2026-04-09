@@ -271,11 +271,22 @@ export async function createUser(params: {
   tec_password_enc: string;
   telegram_chat_id: string;
   drive_root_folder_id: string | null;
+  onedrive_root_folder_id?: string | null;
+  storage_provider?: 'drive' | 'onedrive' | 'none';
 }): Promise<string> {
   const pool = getPool();
   const res = await pool.query<{ id: string }>(
-    `INSERT INTO users (name, tec_username, tec_password_enc, telegram_chat_id, drive_root_folder_id, is_active)
-     VALUES ($1, $2, $3, $4, $5, TRUE)
+    `INSERT INTO users (
+       name,
+       tec_username,
+       tec_password_enc,
+       telegram_chat_id,
+       drive_root_folder_id,
+       onedrive_root_folder_id,
+       storage_provider,
+       is_active
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)
      RETURNING id`,
     [
       params.name,
@@ -283,6 +294,8 @@ export async function createUser(params: {
       params.tec_password_enc,
       params.telegram_chat_id,
       params.drive_root_folder_id,
+      params.onedrive_root_folder_id ?? null,
+      params.storage_provider ?? 'none',
     ],
   );
   return res.rows[0].id;
@@ -294,6 +307,8 @@ export async function updateUser(
     tec_username: string;
     tec_password_enc: string;
     drive_root_folder_id: string | null;
+    storage_provider?: 'drive' | 'onedrive' | 'none';
+    onedrive_root_folder_id?: string | null;
   },
 ): Promise<string> {
   const pool = getPool();
@@ -302,10 +317,19 @@ export async function updateUser(
      SET tec_username = $2,
          tec_password_enc = $3,
          drive_root_folder_id = $4,
+         onedrive_root_folder_id = COALESCE($5, onedrive_root_folder_id),
+         storage_provider = COALESCE($6, storage_provider),
          is_active = TRUE
      WHERE telegram_chat_id = $1
      RETURNING id`,
-    [chatId, params.tec_username, params.tec_password_enc, params.drive_root_folder_id],
+    [
+      chatId,
+      params.tec_username,
+      params.tec_password_enc,
+      params.drive_root_folder_id,
+      params.onedrive_root_folder_id ?? null,
+      params.storage_provider ?? null,
+    ],
   );
   if (res.rows.length === 0) {
     throw new Error('User not found or chat ID mismatch');
@@ -341,6 +365,32 @@ export async function updateUserDriveFolder(
   );
 }
 
+export async function updateUserOneDriveFolder(
+  chatId: string,
+  onedrive_root_folder_id: string | null,
+): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE users
+     SET onedrive_root_folder_id = $2
+     WHERE telegram_chat_id = $1`,
+    [chatId, onedrive_root_folder_id],
+  );
+}
+
+export async function updateUserStorageProvider(
+  chatId: string,
+  storage_provider: 'drive' | 'onedrive' | 'none',
+): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE users
+     SET storage_provider = $2
+     WHERE telegram_chat_id = $1`,
+    [chatId, storage_provider],
+  );
+}
+
 // ─── Pending Bot Registration Queries ────────────────────────────────────────
 
 export type RegistrationStep =
@@ -351,7 +401,9 @@ export type RegistrationStep =
   | 'done'
   | 'update_awaiting_username'
   | 'update_awaiting_password'
-  | 'update_awaiting_drive';
+  | 'update_awaiting_drive'
+  | 'storage_awaiting_drive_folder'
+  | 'storage_awaiting_onedrive_folder';
 
 export interface PendingRegistration {
   id: string;
@@ -360,6 +412,7 @@ export interface PendingRegistration {
   tec_username: string | null;
   tec_password_enc: string | null;
   drive_folder_id: string | null;
+  onedrive_folder_id: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -378,13 +431,22 @@ export async function getPendingRegistration(chatId: string): Promise<PendingReg
 export async function upsertPendingRegistration(chatId: string): Promise<void> {
   const pool = getPool();
   await pool.query(
-    `INSERT INTO pending_registrations (chat_id, step, tec_username, tec_password_enc, drive_folder_id, updated_at)
-     VALUES ($1, 'awaiting_username', NULL, NULL, NULL, NOW())
+    `INSERT INTO pending_registrations (
+       chat_id,
+       step,
+       tec_username,
+       tec_password_enc,
+       drive_folder_id,
+       onedrive_folder_id,
+       updated_at
+     )
+     VALUES ($1, 'awaiting_username', NULL, NULL, NULL, NULL, NOW())
      ON CONFLICT (chat_id) DO UPDATE
        SET step             = 'awaiting_username',
            tec_username     = NULL,
            tec_password_enc = NULL,
            drive_folder_id  = NULL,
+           onedrive_folder_id = NULL,
            updated_at       = NOW()`,
     [chatId],
   );
@@ -396,13 +458,22 @@ export async function upsertPendingRegistrationWithStep(
 ): Promise<void> {
   const pool = getPool();
   await pool.query(
-    `INSERT INTO pending_registrations (chat_id, step, tec_username, tec_password_enc, drive_folder_id, updated_at)
-     VALUES ($1, $2, NULL, NULL, NULL, NOW())
+    `INSERT INTO pending_registrations (
+       chat_id,
+       step,
+       tec_username,
+       tec_password_enc,
+       drive_folder_id,
+       onedrive_folder_id,
+       updated_at
+     )
+     VALUES ($1, $2, NULL, NULL, NULL, NULL, NOW())
      ON CONFLICT (chat_id) DO UPDATE
        SET step             = $2,
            tec_username     = NULL,
            tec_password_enc = NULL,
            drive_folder_id  = NULL,
+           onedrive_folder_id = NULL,
            updated_at       = NOW()`,
     [chatId, step],
   );
@@ -416,6 +487,7 @@ export async function advancePendingRegistration(
     tec_username?: string;
     tec_password_enc?: string;
     drive_folder_id?: string | null;
+    onedrive_folder_id?: string | null;
   },
 ): Promise<void> {
   const pool = getPool();
@@ -425,6 +497,7 @@ export async function advancePendingRegistration(
          tec_username     = COALESCE($3, tec_username),
          tec_password_enc = COALESCE($4, tec_password_enc),
          drive_folder_id  = COALESCE($5, drive_folder_id),
+         onedrive_folder_id = COALESCE($6, onedrive_folder_id),
          updated_at       = NOW()
      WHERE chat_id = $1`,
     [
@@ -433,6 +506,7 @@ export async function advancePendingRegistration(
       data.tec_username ?? null,
       data.tec_password_enc ?? null,
       data.drive_folder_id ?? null,
+      data.onedrive_folder_id ?? null,
     ],
   );
 }
@@ -463,6 +537,32 @@ export async function getDriveOAuthToken(userId: string): Promise<string | null>
 export async function saveDriveOAuthToken(userId: string, encryptedToken: string): Promise<void> {
   const pool = getPool();
   await pool.query('UPDATE users SET drive_oauth_token_enc = $2 WHERE id = $1', [
+    userId,
+    encryptedToken,
+  ]);
+}
+
+/**
+ * Returns the encrypted OneDrive OAuth token JSON for a user, or null if not set.
+ */
+export async function getOneDriveOAuthToken(userId: string): Promise<string | null> {
+  const pool = getPool();
+  const res = await pool.query<{ onedrive_oauth_token_enc: string | null }>(
+    'SELECT onedrive_oauth_token_enc FROM users WHERE id = $1',
+    [userId],
+  );
+  return res.rows[0]?.onedrive_oauth_token_enc ?? null;
+}
+
+/**
+ * Persists the encrypted OneDrive OAuth token JSON for a user.
+ */
+export async function saveOneDriveOAuthToken(
+  userId: string,
+  encryptedToken: string,
+): Promise<void> {
+  const pool = getPool();
+  await pool.query('UPDATE users SET onedrive_oauth_token_enc = $2 WHERE id = $1', [
     userId,
     encryptedToken,
   ]);

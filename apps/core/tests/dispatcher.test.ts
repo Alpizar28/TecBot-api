@@ -23,6 +23,8 @@ describe('dispatch()', () => {
     tec_password_enc: 'enc',
     telegram_chat_id: '123',
     drive_root_folder_id: null,
+    onedrive_root_folder_id: null,
+    storage_provider: 'none',
     is_active: true,
     created_at: new Date(),
   };
@@ -98,6 +100,7 @@ describe('dispatch()', () => {
     const userWithDrive: User = {
       ...user,
       drive_root_folder_id: 'root123',
+      storage_provider: 'drive',
     };
 
     const docNotification: RawNotification = {

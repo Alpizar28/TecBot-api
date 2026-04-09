@@ -12,7 +12,7 @@ import {
   resolveCourseEntry,
 } from '@tec-brain/database';
 import { TelegramService } from '@tec-brain/telegram';
-import { DriveService } from '@tec-brain/drive';
+import { DriveService, OneDriveService } from '@tec-brain/drive';
 import type { User, RawNotification } from '@tec-brain/types';
 import { logger } from './logger.js';
 
@@ -65,7 +65,7 @@ export async function dispatch(
   scraperUrl: string,
   tecPassword: string,
   telegram: TelegramService,
-  drive: DriveService | null,
+  storage: DriveService | OneDriveService | null,
 ): Promise<DispatchResult> {
   const log = logger.child({
     component: 'dispatcher',
@@ -157,7 +157,7 @@ export async function dispatch(
           scraperUrl,
           tecPassword,
           telegram,
-          drive,
+          storage,
           log,
         );
         break;
@@ -194,12 +194,16 @@ async function handleDocumentNotification(
   scraperUrl: string,
   tecPassword: string,
   telegram: TelegramService,
-  drive: DriveService | null,
+  storage: DriveService | OneDriveService | null,
   log: LoggerLike,
 ): Promise<boolean> {
-  if (drive && user.drive_root_folder_id && notification.files && notification.files.length > 0) {
+  const storageProvider = user.storage_provider;
+  const storageRootId =
+    storageProvider === 'onedrive' ? user.onedrive_root_folder_id : user.drive_root_folder_id;
+
+  if (storage && storageRootId && notification.files && notification.files.length > 0) {
     const resolvedCourse = await resolveCourseNameForDrive(notification.course, notification.link);
-    const courseFolderId = await drive.ensureFolder(resolvedCourse, user.drive_root_folder_id);
+    const courseFolderId = await storage.ensureFolder(resolvedCourse, storageRootId);
 
     const results = await Promise.all(
       notification.files.map(async (file) => {
@@ -215,8 +219,12 @@ async function handleDocumentNotification(
           }
 
           log.info(
-            { fileName: file.file_name, downloadUrl: file.download_url },
-            'Attempting Drive upload',
+            {
+              fileName: file.file_name,
+              downloadUrl: file.download_url,
+              storageProvider,
+            },
+            'Attempting storage upload',
           );
 
           // Downloader: proxy the download through the scraper so the active
@@ -236,7 +244,7 @@ async function handleDocumentNotification(
             return { data: res.data, contentType };
           };
 
-          const { fileId } = await drive.downloadAndUpload(
+          const { fileId, webUrl } = await storage.downloadAndUpload(
             downloader,
             file.file_name,
             courseFolderId,
@@ -246,14 +254,14 @@ async function handleDocumentNotification(
           const notified = await safeTelegram(
             user,
             notification,
-            () => telegram.sendDocumentSaved(user, notification, file.file_name, fileId),
+            () => telegram.sendDocumentSaved(user, notification, file.file_name, fileId, webUrl),
             'telegram_doc_saved',
           );
           return notified;
         } catch (error) {
           logStructuredError(user, notification, 'drive_upload', error);
           if (isDriveAuthError(error)) {
-            await maybeNotifyDriveAuthExpiration(user, telegram, log);
+            await maybeNotifyStorageAuthExpiration(user, telegram, log);
           }
           const notified = await safeTelegram(
             user,
@@ -336,7 +344,12 @@ function isDriveAuthError(err: unknown): boolean {
     if (status === 401 || status === 403) {
       const data = err.response?.data as { error?: string; error_description?: string } | undefined;
       const dataMsg = `${data?.error ?? ''} ${data?.error_description ?? ''}`.toLowerCase();
-      if (dataMsg.includes('invalid_grant') || dataMsg.includes('unauthorized')) {
+      if (
+        dataMsg.includes('invalid_grant') ||
+        dataMsg.includes('unauthorized') ||
+        dataMsg.includes('invalidauthenticationtoken') ||
+        dataMsg.includes('invalid_token')
+      ) {
         return true;
       }
     }
@@ -354,7 +367,7 @@ function isDriveAuthError(err: unknown): boolean {
   return false;
 }
 
-async function maybeNotifyDriveAuthExpiration(
+async function maybeNotifyStorageAuthExpiration(
   user: User,
   telegram: TelegramService,
   log: LoggerLike,
@@ -367,9 +380,16 @@ async function maybeNotifyDriveAuthExpiration(
   }
 
   try {
-    await telegram.sendDriveAuthExpired(user);
+    if (user.storage_provider === 'onedrive') {
+      await telegram.sendOneDriveAuthExpired(user);
+    } else {
+      await telegram.sendDriveAuthExpired(user);
+    }
     driveAlertTimestamps.set(user.id, now);
-    log.warn({ userId: user.id }, 'Drive authorization expired. Renewal reminder sent');
+    log.warn(
+      { userId: user.id, storageProvider: user.storage_provider },
+      'Storage authorization expired. Renewal reminder sent',
+    );
   } catch (error) {
     logger.warn(
       {

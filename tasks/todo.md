@@ -36,7 +36,16 @@
 4. [x] Implementar comando /filtros con menu y paginacion en el bot.
 5. [x] Actualizar tests de dispatcher y documentar resultado.
 
+# Plan: OneDrive y almacenamiento seleccionable
+
+1. [x] Agregar columnas y migraciones para storage_provider y OneDrive.
+2. [x] Implementar OAuth OneDrive y servicio de subida.
+3. [x] Agregar selector /almacenamiento en bot y mostrar estado.
+4. [x] Actualizar dispatcher/orchestrator para provider activo.
+5. [x] Actualizar docs y env example.
+
 ## Review
 
 - [ ] Cambios revisados y verificados
 - [ ] Tests: `pnpm --filter @tec-brain/core test -- --run tests/dispatcher.test.ts` (fallo: pnpm no esta instalado)
+- [ ] Tests: OneDrive flow pendiente (pnpm no disponible en entorno local)
