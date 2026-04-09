@@ -3,6 +3,10 @@ import type pg from 'pg';
 import { getPool } from './client.js';
 import type { User, StoredNotification, RawNotification } from '@tec-brain/types';
 
+export function normalizeCourseKey(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 // ─── User Queries ─────────────────────────────────────────────────────────────
 
 export async function getActiveUsers(): Promise<User[]> {
@@ -114,6 +118,15 @@ export async function updateNotificationDocumentStatus(
   );
 }
 
+export async function listUserNotificationCourses(userId: string): Promise<string[]> {
+  const pool = getPool();
+  const res = await pool.query<{ course: string }>(
+    'SELECT DISTINCT course FROM notifications WHERE user_id = $1 ORDER BY course',
+    [userId],
+  );
+  return res.rows.map((row) => row.course).filter(Boolean);
+}
+
 // ─── Document Queries ────────────────────────────────────────────────────────
 
 /**
@@ -145,6 +158,63 @@ export async function insertUploadedFile(
          ON CONFLICT (user_id, file_hash) DO NOTHING`,
     [userId, course, fileHash, filename, driveFileId],
   );
+}
+
+// ─── Course Filters (Per-user mute list) ─────────────────────────────────────
+
+export interface UserCourseFilter {
+  user_id: string;
+  course_key: string;
+  course_label: string;
+  created_at: Date;
+}
+
+export async function listUserCourseFilters(userId: string): Promise<UserCourseFilter[]> {
+  const pool = getPool();
+  const res = await pool.query<UserCourseFilter>(
+    'SELECT * FROM user_course_filters WHERE user_id = $1 ORDER BY created_at',
+    [userId],
+  );
+  return res.rows;
+}
+
+export async function muteUserCourse(
+  userId: string,
+  courseKey: string,
+  courseLabel: string,
+): Promise<void> {
+  const pool = getPool();
+  const key = normalizeCourseKey(courseKey);
+  const label = courseLabel.trim() || courseKey;
+  await pool.query(
+    `INSERT INTO user_course_filters (user_id, course_key, course_label)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id, course_key) DO UPDATE
+       SET course_label = CASE
+         WHEN length($3) > length(user_course_filters.course_label) THEN $3
+         ELSE user_course_filters.course_label
+       END`,
+    [userId, key, label],
+  );
+}
+
+export async function unmuteUserCourse(userId: string, courseKey: string): Promise<void> {
+  const pool = getPool();
+  const key = normalizeCourseKey(courseKey);
+  await pool.query('DELETE FROM user_course_filters WHERE user_id = $1 AND course_key = $2', [
+    userId,
+    key,
+  ]);
+}
+
+export async function isCourseMuted(userId: string, courseKey: string): Promise<boolean> {
+  const pool = getPool();
+  const key = normalizeCourseKey(courseKey);
+  const res = await pool.query(
+    'SELECT 1 FROM user_course_filters WHERE user_id = $1 AND course_key = $2 LIMIT 1',
+    [userId, key],
+  );
+  return res.rowCount > 0;
 }
 
 // ─── User Creation ────────────────────────────────────────────────────────────

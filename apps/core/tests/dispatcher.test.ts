@@ -9,6 +9,8 @@ const db = {
   insertUploadedFile: vi.fn(),
   upsertCourseMapping: vi.fn().mockResolvedValue(undefined),
   getCourseMapping: vi.fn().mockResolvedValue(null),
+  isCourseMuted: vi.fn(),
+  normalizeCourseKey: (value: string) => value.trim().toLowerCase(),
 };
 
 vi.mock('@tec-brain/database', () => db);
@@ -37,6 +39,7 @@ describe('dispatch()', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    db.isCourseMuted.mockResolvedValue(false);
   });
 
   it('returns duplicate when notification already processed', async () => {
@@ -159,5 +162,30 @@ describe('dispatch()', () => {
       'fallback',
     );
     expect(db.insertNotification).toHaveBeenCalled();
+  });
+
+  it('skips muted courses without dispatching', async () => {
+    db.getNotificationState.mockResolvedValue({ exists: false, document_status: null });
+    db.isCourseMuted.mockResolvedValue(true);
+
+    const { dispatch } = await import('../src/dispatcher.js');
+    const sendNotice = vi.fn();
+    const result = await dispatch(
+      user,
+      notification,
+      'http://scraper',
+      'password',
+      {
+        sendNotice,
+        sendEvaluation: vi.fn(),
+        sendDocumentSaved: vi.fn(),
+        sendDocumentLink: vi.fn(),
+      } as any,
+      null,
+    );
+
+    expect(result).toEqual({ processed: true, reason: 'muted' });
+    expect(sendNotice).not.toHaveBeenCalled();
+    expect(db.insertNotification).toHaveBeenCalledTimes(1);
   });
 });

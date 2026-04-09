@@ -8,6 +8,8 @@ import {
   insertUploadedFile,
   upsertCourseMapping,
   getCourseMapping,
+  isCourseMuted,
+  normalizeCourseKey,
 } from '@tec-brain/database';
 import { TelegramService } from '@tec-brain/telegram';
 import { DriveService } from '@tec-brain/drive';
@@ -76,9 +78,19 @@ export async function dispatch(
     user.id,
     notification.external_id,
   );
+  const courseKey = normalizeCourseKey(notification.course);
+  const muted = await isCourseMuted(user.id, courseKey);
   const isDocument = notification.type === 'documento';
   const resolvedNow = notification.document_status === 'resolved' && !!notification.files?.length;
   let hasPendingUploads = false;
+
+  if (muted) {
+    log.info({ courseKey, course: notification.course }, 'Notification muted by user filter');
+    if (!exists) {
+      await insertNotification(user.id, notification);
+    }
+    return { processed: true, reason: 'muted' };
+  }
 
   if (exists && isDocument && notification.files && notification.files.length > 0) {
     for (const file of notification.files) {

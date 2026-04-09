@@ -17,6 +17,11 @@ import {
   createOAuthState,
   updateUserCredentials,
   updateUserDriveFolder,
+  listUserNotificationCourses,
+  listUserCourseFilters,
+  muteUserCourse,
+  unmuteUserCourse,
+  normalizeCourseKey,
   type RegistrationStep,
 } from '@tec-brain/database';
 import { loadOAuthClientConfig, getAuthorizationUrl, type OAuthClient } from '@tec-brain/drive';
@@ -44,6 +49,7 @@ const CORE_BASE_URL = process.env.CORE_BASE_URL ?? 'http://core:3002';
 // real state lives in the DB (pending_registrations table).
 interface SessionData {
   _: null;
+  filtersPage: number;
 }
 type BotContext = Context & SessionFlavor<SessionData>;
 
@@ -80,6 +86,52 @@ function isTecEmail(value: string): boolean {
   return /^[a-zA-Z0-9._%+-]+@(estudiantec\.cr|itcr\.ac\.cr|tec\.ac\.cr)$/i.test(value.trim());
 }
 
+interface CourseFilterEntry {
+  key: string;
+  label: string;
+  muted: boolean;
+}
+
+const FILTERS_PAGE_SIZE = 6;
+
+function pickLongerLabel(a: string, b: string | undefined): string {
+  if (!b) return a;
+  return b.length > a.length ? b : a;
+}
+
+async function loadCourseFilterEntries(userId: string): Promise<{
+  entries: CourseFilterEntry[];
+  mutedCount: number;
+}> {
+  const notificationCourses = await listUserNotificationCourses(userId);
+  const filters = await listUserCourseFilters(userId);
+  const mutedMap = new Map(filters.map((filter) => [filter.course_key, filter.course_label]));
+  const entries = new Map<string, CourseFilterEntry>();
+
+  for (const course of notificationCourses) {
+    const key = normalizeCourseKey(course);
+    const label = pickLongerLabel(course, mutedMap.get(key));
+    entries.set(key, { key, label, muted: mutedMap.has(key) });
+  }
+
+  for (const filter of filters) {
+    const existing = entries.get(filter.course_key);
+    if (existing) {
+      existing.label = pickLongerLabel(existing.label, filter.course_label);
+      existing.muted = true;
+    } else {
+      entries.set(filter.course_key, {
+        key: filter.course_key,
+        label: filter.course_label,
+        muted: true,
+      });
+    }
+  }
+
+  const sortedEntries = [...entries.values()].sort((a, b) => a.label.localeCompare(b.label));
+  return { entries: sortedEntries, mutedCount: filters.length };
+}
+
 // ─── Startup ──────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -110,7 +162,7 @@ async function main() {
   // ─── Bot setup — fresh instance every startup ──────────────────────────────
 
   const bot = new Bot<BotContext>(BOT_TOKEN as string);
-  bot.use(session({ initial: (): SessionData => ({ _: null }) }));
+  bot.use(session({ initial: (): SessionData => ({ _: null, filtersPage: 0 }) }));
 
   // ─── Menus ─────────────────────────────────────────────────────────────────
 
@@ -289,6 +341,79 @@ async function main() {
   bot.use(skipDriveMenu);
   bot.use(updateMenu);
 
+  // ─── Filters Menu ──────────────────────────────────────────────────────────
+
+  const filtersMenu = new Menu<BotContext>('filters-menu').dynamic(async (ctx, range) => {
+    const chatId = String(ctx.chat?.id);
+    const user = await getUserByTelegramChatId(chatId);
+    if (!user) {
+      range.text('❌ No registrado', async (ctx) => {
+        await ctx.answerCallbackQuery('Envía /start para registrarte.');
+      });
+      return;
+    }
+
+    const { entries } = await loadCourseFilterEntries(user.id);
+    if (entries.length === 0) {
+      range.text('Sin cursos', async (ctx) => {
+        await ctx.answerCallbackQuery('Aún no hay cursos para filtrar.');
+      });
+      return;
+    }
+
+    const totalPages = Math.max(1, Math.ceil(entries.length / FILTERS_PAGE_SIZE));
+    const page = Math.min(ctx.session.filtersPage, totalPages - 1);
+    ctx.session.filtersPage = page;
+
+    const pageEntries = entries.slice(
+      page * FILTERS_PAGE_SIZE,
+      page * FILTERS_PAGE_SIZE + FILTERS_PAGE_SIZE,
+    );
+
+    for (const entry of pageEntries) {
+      const label = entry.muted ? `🔇 ${entry.label}` : `🔔 ${entry.label}`;
+      const courseKey = entry.key;
+      const courseLabel = entry.label;
+      const isMuted = entry.muted;
+
+      range.text(label, async (ctx) => {
+        const chatId = String(ctx.chat?.id);
+        const user = await getUserByTelegramChatId(chatId);
+        if (!user) {
+          await ctx.answerCallbackQuery('No estás registrado.');
+          return;
+        }
+
+        if (isMuted) {
+          await unmuteUserCourse(user.id, courseKey);
+          await ctx.answerCallbackQuery('Curso activado');
+        } else {
+          await muteUserCourse(user.id, courseKey, courseLabel);
+          await ctx.answerCallbackQuery('Curso silenciado');
+        }
+
+        await ctx.menu.update();
+      });
+      range.row();
+    }
+
+    if (totalPages > 1) {
+      range.text('⬅️', async (ctx) => {
+        ctx.session.filtersPage = Math.max(0, page - 1);
+        await ctx.menu.update();
+      });
+      range.text(`${page + 1}/${totalPages}`, async (ctx) => {
+        await ctx.answerCallbackQuery(`Página ${page + 1} de ${totalPages}`);
+      });
+      range.text('➡️', async (ctx) => {
+        ctx.session.filtersPage = Math.min(totalPages - 1, page + 1);
+        await ctx.menu.update();
+      });
+    }
+  });
+
+  bot.use(filtersMenu);
+
   // ─── /start ─────────────────────────────────────────────────────────────────
 
   bot.command('start', async (ctx) => {
@@ -386,6 +511,38 @@ async function main() {
         `<b>Estado actual:</b> ${stepLabels[pending.step]}\n\n` +
         `Continúa respondiendo a las preguntas anteriores, o envía /cancelar para empezar de nuevo.`,
       { parse_mode: 'HTML' },
+    );
+  });
+
+  // ─── /filtros ───────────────────────────────────────────────────────────────
+
+  bot.command('filtros', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    if (isRateLimited(chatId)) return;
+    const user = await getUserByTelegramChatId(chatId);
+
+    if (!user) {
+      await ctx.reply('❌ No tienes una cuenta registrada. Envía /start para comenzar.');
+      return;
+    }
+
+    const { entries, mutedCount } = await loadCourseFilterEntries(user.id);
+    if (entries.length === 0) {
+      await ctx.reply(
+        'Aún no tengo cursos o comunidades con notificaciones para mostrar.\n\n' +
+          'Cuando llegue la primera notificación, podrás silenciarla desde aquí.',
+      );
+      return;
+    }
+
+    ctx.session.filtersPage = 0;
+    await ctx.reply(
+      `🎛️ <b>Filtros de cursos y comunidades</b>\n\n` +
+        `🔇 Silenciados: <b>${mutedCount}</b>\n` +
+        `📚 Total: <b>${entries.length}</b>\n\n` +
+        `Toca un curso para silenciarlo o activarlo.\n` +
+        `<i>Se muestran cursos detectados y los que ya silenciaste.</i>`,
+      { parse_mode: 'HTML', reply_markup: filtersMenu },
     );
   });
 
@@ -605,6 +762,7 @@ async function main() {
     { command: 'start', description: 'Registrar tu cuenta en el bot' },
     { command: 'actualizar', description: 'Actualizar correo, contraseña o carpeta de Drive' },
     { command: 'estado', description: 'Ver el estado de tu registro' },
+    { command: 'filtros', description: 'Silenciar cursos o comunidades' },
     { command: 'cancelar', description: 'Cancelar el registro en progreso' },
   ]);
 

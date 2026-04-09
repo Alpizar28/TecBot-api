@@ -12,8 +12,13 @@ export {
   getNotificationState,
   insertNotification,
   updateNotificationDocumentStatus,
+  listUserNotificationCourses,
   uploadedFileExists,
   insertUploadedFile,
+  listUserCourseFilters,
+  muteUserCourse,
+  unmuteUserCourse,
+  isCourseMuted,
   getDriveOAuthToken,
   saveDriveOAuthToken,
   createOAuthState,
@@ -31,3 +36,4 @@ export {
 } from './queries.js';
 export { runMigrations } from './migrate.js';
 export { encrypt, decrypt, reEncryptLegacyCbcRows } from './crypto.js';
+export { normalizeCourseKey } from './queries.js';

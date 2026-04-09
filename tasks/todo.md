@@ -27,3 +27,16 @@
 1. [x] Analizar flujo actual de errores Drive y decidir criterio para `invalid_grant`/401.
 2. [x] Implementar alerta (Telegram/admin) cuando se detecte expiración y evitar spam.
 3. [x] Añadir pruebas/documentación y validar con suite core.
+
+# Plan: Filtros de cursos y comunidades en Telegram
+
+1. [x] Definir esquema de filtros por usuario y migracion SQL.
+2. [x] Agregar queries en packages/database para silenciar y listar cursos.
+3. [x] Aplicar filtro en dispatcher para omitir Telegram y Drive.
+4. [x] Implementar comando /filtros con menu y paginacion en el bot.
+5. [x] Actualizar tests de dispatcher y documentar resultado.
+
+## Review
+
+- [ ] Cambios revisados y verificados
+- [ ] Tests: `pnpm --filter @tec-brain/core test -- --run tests/dispatcher.test.ts` (fallo: pnpm no esta instalado)
