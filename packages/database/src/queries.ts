@@ -214,7 +214,7 @@ export async function isCourseMuted(userId: string, courseKey: string): Promise<
     'SELECT 1 FROM user_course_filters WHERE user_id = $1 AND course_key = $2 LIMIT 1',
     [userId, key],
   );
-  return res.rowCount > 0;
+  return (res.rowCount ?? 0) > 0;
 }
 
 // ─── User Creation ────────────────────────────────────────────────────────────
