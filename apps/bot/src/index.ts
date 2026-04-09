@@ -20,8 +20,8 @@ import {
   listUserNotificationCourses,
   listUserCourseFilters,
   muteUserCourse,
-  unmuteUserCourse,
-  normalizeCourseKey,
+  unmuteUserCourses,
+  resolveCourseEntry,
   type RegistrationStep,
 } from '@tec-brain/database';
 import { loadOAuthClientConfig, getAuthorizationUrl, type OAuthClient } from '@tec-brain/drive';
@@ -90,6 +90,7 @@ interface CourseFilterEntry {
   key: string;
   label: string;
   muted: boolean;
+  legacyKeys: string[];
 }
 
 const FILTERS_PAGE_SIZE = 6;
@@ -105,31 +106,55 @@ async function loadCourseFilterEntries(userId: string): Promise<{
 }> {
   const notificationCourses = await listUserNotificationCourses(userId);
   const filters = await listUserCourseFilters(userId);
-  const mutedMap = new Map(filters.map((filter) => [filter.course_key, filter.course_label]));
   const entries = new Map<string, CourseFilterEntry>();
 
-  for (const course of notificationCourses) {
-    const key = normalizeCourseKey(course);
-    const label = pickLongerLabel(course, mutedMap.get(key));
-    entries.set(key, { key, label, muted: mutedMap.has(key) });
+  const resolvedCourses = await Promise.all(
+    notificationCourses.map(async (course) => resolveCourseEntry(course)),
+  );
+
+  for (const resolved of resolvedCourses) {
+    const legacyKeys = [resolved.legacyKey].filter((key) => key && key !== resolved.key);
+    const existing = entries.get(resolved.key);
+    if (existing) {
+      existing.label = pickLongerLabel(existing.label, resolved.label);
+      existing.legacyKeys = [...new Set([...existing.legacyKeys, ...legacyKeys])];
+    } else {
+      entries.set(resolved.key, {
+        key: resolved.key,
+        label: resolved.label,
+        muted: false,
+        legacyKeys,
+      });
+    }
   }
 
   for (const filter of filters) {
-    const existing = entries.get(filter.course_key);
+    const isLegacyKey = !filter.course_key.includes(':') && filter.course_key !== 'unknown';
+    const resolved = isLegacyKey ? await resolveCourseEntry(filter.course_label) : null;
+    const entryKey = resolved?.key ?? filter.course_key;
+    const legacyKeys = [isLegacyKey ? filter.course_key : null, resolved?.legacyKey ?? null].filter(
+      (key): key is string => !!key && key !== entryKey,
+    );
+
+    const existing = entries.get(entryKey);
+    const labelCandidate = resolved?.label ?? filter.course_label;
     if (existing) {
-      existing.label = pickLongerLabel(existing.label, filter.course_label);
+      existing.label = pickLongerLabel(existing.label, labelCandidate);
+      existing.legacyKeys = [...new Set([...existing.legacyKeys, ...legacyKeys])];
       existing.muted = true;
     } else {
-      entries.set(filter.course_key, {
-        key: filter.course_key,
-        label: filter.course_label,
+      entries.set(entryKey, {
+        key: entryKey,
+        label: labelCandidate,
         muted: true,
+        legacyKeys,
       });
     }
   }
 
   const sortedEntries = [...entries.values()].sort((a, b) => a.label.localeCompare(b.label));
-  return { entries: sortedEntries, mutedCount: filters.length };
+  const mutedCount = sortedEntries.filter((entry) => entry.muted).length;
+  return { entries: sortedEntries, mutedCount };
 }
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
@@ -375,6 +400,7 @@ async function main() {
       const courseKey = entry.key;
       const courseLabel = entry.label;
       const isMuted = entry.muted;
+      const legacyKeys = entry.legacyKeys;
 
       range.text(label, async (ctx) => {
         const chatId = String(ctx.chat?.id);
@@ -385,7 +411,10 @@ async function main() {
         }
 
         if (isMuted) {
-          await unmuteUserCourse(user.id, courseKey);
+          const keysToClear = [courseKey, ...legacyKeys].filter(
+            (key, index, arr) => key && arr.indexOf(key) === index,
+          );
+          await unmuteUserCourses(user.id, keysToClear);
           await ctx.answerCallbackQuery('Curso activado');
         } else {
           await muteUserCourse(user.id, courseKey, courseLabel);

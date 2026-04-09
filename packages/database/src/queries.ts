@@ -3,8 +3,29 @@ import type pg from 'pg';
 import { getPool } from './client.js';
 import type { User, StoredNotification, RawNotification } from '@tec-brain/types';
 
+const COURSE_CODE_RE = /^[A-Z]{2,4}\d{3,4}$/i;
+const GENERIC_COURSE_LABELS = new Set([
+  'hay una nueva noticia en el curso',
+  'nueva noticia en el curso',
+]);
+
+export function normalizeCourseLabel(value: string): string {
+  return value.trim().replace(/\s+/g, ' ');
+}
+
 export function normalizeCourseKey(value: string): string {
-  return value.trim().replace(/\s+/g, ' ').toLowerCase();
+  return normalizeCourseLabel(value).toLowerCase();
+}
+
+function normalizeGenericCourseLabel(value: string): string {
+  return normalizeCourseLabel(value)
+    .replace(/[.:]+$/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function isGenericCourseLabel(value: string): boolean {
+  return GENERIC_COURSE_LABELS.has(normalizeGenericCourseLabel(value));
 }
 
 // ─── User Queries ─────────────────────────────────────────────────────────────
@@ -215,6 +236,27 @@ export async function isCourseMuted(userId: string, courseKey: string): Promise<
     [userId, key],
   );
   return (res.rowCount ?? 0) > 0;
+}
+
+export async function isAnyCourseMuted(userId: string, courseKeys: string[]): Promise<boolean> {
+  if (courseKeys.length === 0) return false;
+  const pool = getPool();
+  const normalizedKeys = [...new Set(courseKeys.map((key) => normalizeCourseKey(key)))];
+  const res = await pool.query(
+    'SELECT 1 FROM user_course_filters WHERE user_id = $1 AND course_key = ANY($2) LIMIT 1',
+    [userId, normalizedKeys],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+export async function unmuteUserCourses(userId: string, courseKeys: string[]): Promise<void> {
+  if (courseKeys.length === 0) return;
+  const pool = getPool();
+  const normalizedKeys = [...new Set(courseKeys.map((key) => normalizeCourseKey(key)))];
+  await pool.query('DELETE FROM user_course_filters WHERE user_id = $1 AND course_key = ANY($2)', [
+    userId,
+    normalizedKeys,
+  ]);
 }
 
 // ─── User Creation ────────────────────────────────────────────────────────────
@@ -501,6 +543,85 @@ export async function getCourseMapping(code: string): Promise<string | null> {
     [upper],
   );
   return res.rows[0]?.name ?? null;
+}
+
+/**
+ * Returns the stored course code for a full course name, or null if unknown.
+ */
+export async function getCourseCodeByName(name: string): Promise<string | null> {
+  const pool = getPool();
+  const normalized = normalizeCourseLabel(name);
+  const res = await pool.query<{ code: string }>(
+    'SELECT code FROM course_mappings WHERE lower(name) = lower($1) LIMIT 1',
+    [normalized],
+  );
+  return res.rows[0]?.code ?? null;
+}
+
+export interface ResolvedCourseEntry {
+  key: string;
+  label: string;
+  legacyKey: string;
+  code: string | null;
+  name: string | null;
+  isUnknown: boolean;
+}
+
+/**
+ * Builds a canonical key + label for course filters.
+ */
+export async function resolveCourseEntry(course: string): Promise<ResolvedCourseEntry> {
+  const normalizedLabel = normalizeCourseLabel(course);
+  const legacyKey = normalizeCourseKey(normalizedLabel);
+
+  if (!normalizedLabel || isGenericCourseLabel(normalizedLabel)) {
+    return {
+      key: 'unknown',
+      label: 'Curso desconocido',
+      legacyKey,
+      code: null,
+      name: null,
+      isUnknown: true,
+    };
+  }
+
+  if (COURSE_CODE_RE.test(normalizedLabel)) {
+    const code = normalizedLabel.toUpperCase();
+    const mappedName = await getCourseMapping(code);
+    const label = mappedName ? `${code} - ${mappedName}` : code;
+    return {
+      key: normalizeCourseKey(`code:${code}`),
+      label,
+      legacyKey,
+      code,
+      name: mappedName,
+      isUnknown: false,
+    };
+  }
+
+  const code = await getCourseCodeByName(normalizedLabel);
+  if (code) {
+    const mappedName = await getCourseMapping(code).catch(() => null);
+    const name =
+      mappedName && mappedName.length > normalizedLabel.length ? mappedName : normalizedLabel;
+    return {
+      key: normalizeCourseKey(`code:${code}`),
+      label: `${code} - ${name}`,
+      legacyKey,
+      code,
+      name,
+      isUnknown: false,
+    };
+  }
+
+  return {
+    key: `name:${legacyKey}`,
+    label: normalizedLabel,
+    legacyKey,
+    code: null,
+    name: normalizedLabel,
+    isUnknown: false,
+  };
 }
 
 export type { pg };

@@ -18,7 +18,11 @@ export {
   listUserCourseFilters,
   muteUserCourse,
   unmuteUserCourse,
+  unmuteUserCourses,
   isCourseMuted,
+  isAnyCourseMuted,
+  resolveCourseEntry,
+  getCourseCodeByName,
   getDriveOAuthToken,
   saveDriveOAuthToken,
   createOAuthState,
@@ -36,4 +40,4 @@ export {
 } from './queries.js';
 export { runMigrations } from './migrate.js';
 export { encrypt, decrypt, reEncryptLegacyCbcRows } from './crypto.js';
-export { normalizeCourseKey } from './queries.js';
+export { normalizeCourseKey, normalizeCourseLabel } from './queries.js';

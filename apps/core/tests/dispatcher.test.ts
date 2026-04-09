@@ -9,8 +9,8 @@ const db = {
   insertUploadedFile: vi.fn(),
   upsertCourseMapping: vi.fn().mockResolvedValue(undefined),
   getCourseMapping: vi.fn().mockResolvedValue(null),
-  isCourseMuted: vi.fn(),
-  normalizeCourseKey: (value: string) => value.trim().toLowerCase(),
+  isAnyCourseMuted: vi.fn(),
+  resolveCourseEntry: vi.fn(),
 };
 
 vi.mock('@tec-brain/database', () => db);
@@ -39,7 +39,15 @@ describe('dispatch()', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    db.isCourseMuted.mockResolvedValue(false);
+    db.isAnyCourseMuted.mockResolvedValue(false);
+    db.resolveCourseEntry.mockResolvedValue({
+      key: 'code:el2207',
+      label: 'EL2207 - Curso',
+      legacyKey: 'el2207',
+      code: 'EL2207',
+      name: 'Curso',
+      isUnknown: false,
+    });
   });
 
   it('returns duplicate when notification already processed', async () => {
@@ -166,7 +174,7 @@ describe('dispatch()', () => {
 
   it('skips muted courses without dispatching', async () => {
     db.getNotificationState.mockResolvedValue({ exists: false, document_status: null });
-    db.isCourseMuted.mockResolvedValue(true);
+    db.isAnyCourseMuted.mockResolvedValue(true);
 
     const { dispatch } = await import('../src/dispatcher.js');
     const sendNotice = vi.fn();
