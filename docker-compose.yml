@@ -39,6 +39,7 @@ services:
           memory: 100M
     environment:
       PORT: '3001'
+      SCRAPER_SECRET: '${SCRAPER_SECRET}'
     volumes:
       - sessions_data:/app/data/sessions
     healthcheck:
@@ -76,6 +77,7 @@ services:
       CRON_SCHEDULE: '${CRON_SCHEDULE}'
       CORE_CONCURRENCY: '${CORE_CONCURRENCY}'
       INTERNAL_API_SECRET: '${INTERNAL_API_SECRET}'
+      SCRAPER_SECRET: '${SCRAPER_SECRET}'
     volumes:
       - credentials_data:/app/data/credentials:ro
     depends_on:
@@ -113,6 +115,7 @@ services:
       TELEGRAM_BOT_TOKEN: '${TELEGRAM_BOT_TOKEN}'
       GOOGLE_OAUTH_CLIENT_PATH: '/app/data/credentials/oauth_client.json'
       CORE_BASE_URL: 'http://core:3002'
+      ADMIN_ALERT_CHAT_ID: '${ADMIN_ALERT_CHAT_ID}'
     volumes:
       - credentials_data:/app/data/credentials:ro
     depends_on:
