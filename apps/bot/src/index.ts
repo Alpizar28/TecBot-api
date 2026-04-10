@@ -933,11 +933,6 @@ async function main() {
     }
   });
 
-  // ─── /moid (temporal debug) ──────────────────────────────────────────────────
-  bot.command('moid', async (ctx) => {
-    await ctx.reply(`Tu chat ID es: <code>${ctx.chat.id}</code>`, { parse_mode: 'HTML' });
-  });
-
   // ─── /admin ─────────────────────────────────────────────────────────────────
 
   const ADMIN_CHAT_ID = process.env.ADMIN_ALERT_CHAT_ID;
@@ -947,7 +942,7 @@ async function main() {
 
   bot.command('admin', async (ctx) => {
     const chatId = String(ctx.chat.id);
-    if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return;
+    if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID.trim()) return;
 
     try {
       const stats = await getAdminStats();
