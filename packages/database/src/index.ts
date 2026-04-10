@@ -41,6 +41,8 @@ export {
   deletePendingRegistration,
   type PendingRegistration,
   type RegistrationStep,
+  getAdminStats,
+  type AdminStats,
 } from './queries.js';
 export { runMigrations } from './migrate.js';
 export { encrypt, decrypt, reEncryptLegacyCbcRows } from './crypto.js';

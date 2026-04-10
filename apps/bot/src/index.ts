@@ -24,6 +24,7 @@ import {
   muteUserCourse,
   unmuteUserCourses,
   resolveCourseEntry,
+  getAdminStats,
   type RegistrationStep,
 } from '@tec-brain/database';
 import {
@@ -929,6 +930,34 @@ async function main() {
         },
       );
       return;
+    }
+  });
+
+  // ─── /admin ─────────────────────────────────────────────────────────────────
+
+  const ADMIN_CHAT_ID = process.env.ADMIN_ALERT_CHAT_ID || '6317692621';
+
+  bot.command('admin', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    if (chatId !== ADMIN_CHAT_ID) return;
+
+    try {
+      const stats = await getAdminStats();
+      const { activeUsers, storageBreakdown, totalNotifications, totalUploadedFiles } = stats;
+
+      await ctx.reply(
+        `🛡️ <b>Panel de Admin</b>\n\n` +
+          `👥 <b>Usuarios activos:</b> ${activeUsers}\n` +
+          `   ├ Google Drive: ${storageBreakdown.drive}\n` +
+          `   ├ OneDrive: ${storageBreakdown.onedrive}\n` +
+          `   └ Sin almacenamiento: ${storageBreakdown.none}\n\n` +
+          `🔔 <b>Notificaciones enviadas:</b> ${totalNotifications.toLocaleString()}\n` +
+          `📁 <b>Archivos subidos:</b> ${totalUploadedFiles.toLocaleString()}`,
+        { parse_mode: 'HTML' },
+      );
+    } catch (err) {
+      await ctx.reply('❌ Error al obtener estadísticas.');
+      logger.error({ err }, '/admin stats error');
     }
   });
 
