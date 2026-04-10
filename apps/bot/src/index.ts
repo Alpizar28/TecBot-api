@@ -988,6 +988,7 @@ async function main() {
     { command: 'estado', description: 'Ver el estado de tu registro' },
     { command: 'filtros', description: 'Silenciar cursos o comunidades' },
     { command: 'cancelar', description: 'Cancelar el registro en progreso' },
+    { command: 'admin', description: 'Panel de administración' },
   ]);
 
   logger.info('Starting bot (long polling)');
