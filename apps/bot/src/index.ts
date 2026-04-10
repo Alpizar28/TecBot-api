@@ -935,11 +935,14 @@ async function main() {
 
   // ─── /admin ─────────────────────────────────────────────────────────────────
 
-  const ADMIN_CHAT_ID = process.env.ADMIN_ALERT_CHAT_ID || '6317692621';
+  const ADMIN_CHAT_ID = process.env.ADMIN_ALERT_CHAT_ID;
+  if (!ADMIN_CHAT_ID) {
+    logger.warn('ADMIN_ALERT_CHAT_ID is not set — /admin command is disabled');
+  }
 
   bot.command('admin', async (ctx) => {
     const chatId = String(ctx.chat.id);
-    if (chatId !== ADMIN_CHAT_ID) return;
+    if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return;
 
     try {
       const stats = await getAdminStats();
