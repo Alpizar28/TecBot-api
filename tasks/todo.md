@@ -44,6 +44,12 @@
 4. [x] Actualizar dispatcher/orchestrator para provider activo.
 5. [x] Actualizar docs y env example.
 
+# Plan: RLS en PostgreSQL
+
+1. [ ] Definir modelo de RLS (tenants, session user, service role).
+2. [ ] Agregar migracion con ENABLE RLS + policies.
+3. [ ] Ajustar acceso DB para setear user_id en la sesion.
+
 ## Review
 
 - [ ] Cambios revisados y verificados

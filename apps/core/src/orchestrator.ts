@@ -216,6 +216,7 @@ async function processUser(
 
   const password = decrypt(user.tec_password_enc);
 
+  const scraperSecret = process.env.SCRAPER_SECRET;
   const response = await requestWithRetry(
     () =>
       axios.post<ScrapeResponse>(
@@ -226,7 +227,10 @@ async function processUser(
           dispatchUrl: `http://core:${process.env.PORT ?? '3002'}/api/internal-dispatch`,
           dispatchSecret: process.env.INTERNAL_API_SECRET ?? '',
         },
-        { timeout: 300_000 },
+        {
+          timeout: 300_000,
+          headers: scraperSecret ? { 'x-scraper-secret': scraperSecret } : {},
+        },
       ),
     'scraper.process_sequential',
   );

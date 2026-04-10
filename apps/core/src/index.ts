@@ -73,8 +73,30 @@ async function main() {
     uptime_s: Math.floor(process.uptime()),
   }));
 
-  // Manual trigger for testing
-  fastify.post('/api/run-now', async () => {
+  const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
+  if (!INTERNAL_API_SECRET) {
+    logger.warn(
+      { component: 'core_startup' },
+      'INTERNAL_API_SECRET is not set — /api/run-now and /api/internal-dispatch are UNPROTECTED. Set this variable in production.',
+    );
+  }
+
+  function requireInternalSecret(
+    request: import('fastify').FastifyRequest,
+    reply: import('fastify').FastifyReply,
+  ): boolean {
+    if (!INTERNAL_API_SECRET) return true; // open only in dev; warn already logged above
+    const provided = request.headers['x-internal-secret'];
+    if (provided !== INTERNAL_API_SECRET) {
+      void reply.status(401).send({ status: 'error', error: 'Unauthorized' });
+      return false;
+    }
+    return true;
+  }
+
+  // Manual trigger for testing — requires x-internal-secret header
+  fastify.post('/api/run-now', async (request, reply) => {
+    if (!requireInternalSecret(request, reply)) return;
     setImmediate(() => void runOrchestrationCycle());
     return { status: 'triggered' };
   });
@@ -82,14 +104,7 @@ async function main() {
   fastify.post<{
     Body: { userId: string; notification: RawNotification; cookies: ScrapeResponse['cookies'] };
   }>('/api/internal-dispatch', async (request, reply) => {
-    // Verify shared secret to prevent unauthorized dispatch from outside the stack
-    const internalSecret = process.env.INTERNAL_API_SECRET;
-    if (internalSecret) {
-      const provided = request.headers['x-internal-secret'];
-      if (provided !== internalSecret) {
-        return reply.status(401).send({ status: 'error', error: 'Unauthorized' });
-      }
-    }
+    if (!requireInternalSecret(request, reply)) return;
     try {
       const { userId, notification, cookies } = request.body;
       const result = await handleInternalDispatch(userId, notification, cookies);

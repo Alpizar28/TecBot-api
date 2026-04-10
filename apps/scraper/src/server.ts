@@ -6,6 +6,7 @@ import { processNotificationsSequentially } from './extractors/notifications.js'
 import type { ScrapeResponse } from '@tec-brain/types';
 
 const SESSION_DIR = process.env.SESSION_DIR ?? './data/sessions';
+const SCRAPER_SECRET = process.env.SCRAPER_SECRET;
 
 let sessionManager: SessionManager;
 
@@ -15,6 +16,12 @@ export function buildServer(): FastifyInstance {
       level: process.env.LOG_LEVEL ?? 'info',
     },
   });
+
+  if (!SCRAPER_SECRET) {
+    fastify.log.warn(
+      'SCRAPER_SECRET is not set — scraper endpoints are UNPROTECTED. Set this variable in production.',
+    );
+  }
 
   void fastify.register(sensible);
   void fastify.register(helmet, { global: true });
@@ -59,6 +66,9 @@ export function buildServer(): FastifyInstance {
       },
     },
     async (request, reply): Promise<ScrapeResponse> => {
+      if (SCRAPER_SECRET && request.headers['x-scraper-secret'] !== SCRAPER_SECRET) {
+        return reply.status(401).send({ status: 'error', error: 'Unauthorized' }) as never;
+      }
       const { userId } = request.params;
       const { username, password, dispatchUrl, dispatchSecret = '', keywords = [] } = request.body;
 
@@ -138,6 +148,9 @@ export function buildServer(): FastifyInstance {
       },
     },
     async (request, reply) => {
+      if (SCRAPER_SECRET && request.headers['x-scraper-secret'] !== SCRAPER_SECRET) {
+        return reply.status(401).send({ error: 'Unauthorized' });
+      }
       const { username, password, downloadUrl } = request.body;
 
       try {
