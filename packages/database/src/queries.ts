@@ -724,4 +724,42 @@ export async function resolveCourseEntry(course: string): Promise<ResolvedCourse
   };
 }
 
+// ─── Admin Stats ─────────────────────────────────────────────────────────────
+
+export interface AdminStats {
+  activeUsers: number;
+  storageBreakdown: { drive: number; onedrive: number; none: number };
+  totalNotifications: number;
+  totalUploadedFiles: number;
+}
+
+export async function getAdminStats(): Promise<AdminStats> {
+  const pool = getPool();
+
+  const [usersRes, notifRes, filesRes] = await Promise.all([
+    pool.query<{ storage_provider: string; count: string }>(
+      `SELECT storage_provider, COUNT(*)::text AS count FROM users WHERE is_active = TRUE GROUP BY storage_provider`,
+    ),
+    pool.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM notifications`),
+    pool.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM uploaded_files`),
+  ]);
+
+  const breakdown = { drive: 0, onedrive: 0, none: 0 };
+  let activeUsers = 0;
+  for (const row of usersRes.rows) {
+    const n = parseInt(row.count, 10);
+    activeUsers += n;
+    if (row.storage_provider === 'drive') breakdown.drive = n;
+    else if (row.storage_provider === 'onedrive') breakdown.onedrive = n;
+    else breakdown.none = n;
+  }
+
+  return {
+    activeUsers,
+    storageBreakdown: breakdown,
+    totalNotifications: parseInt(notifRes.rows[0]?.count ?? '0', 10),
+    totalUploadedFiles: parseInt(filesRes.rows[0]?.count ?? '0', 10),
+  };
+}
+
 export type { pg };
