@@ -1,87 +1,130 @@
 import axios, { type AxiosInstance } from 'axios';
-import type { User, RawNotification } from '@tec-brain/types';
+import type { User, RawNotification, FileReference } from '@tec-brain/types';
+
+const SEPARATOR = '───────────────';
 
 // ─── Message Formatters ───────────────────────────────────────────────────────
 
-function formatNotice(user: User, n: RawNotification): string {
-  const parts: string[] = [`<b>${escapeHtml(n.course)}</b>`];
+function formatNotice(_user: User, n: RawNotification): string {
+  const parts: string[] = [`📰 <b>${escapeHtml(n.course)}</b>`, SEPARATOR];
 
   // If we have a resolved title that differs from the description, show it
   const isGenericDescription = n.description.toLowerCase().includes('hay una nueva noticia');
   if (!isGenericDescription) {
-    // title is the real news title
-    parts.push(`<b>${escapeHtml(n.title)}</b>`);
-    // description is the news body — truncate at 600 chars to avoid hitting Telegram limits
+    parts.push(`📌 <b>${escapeHtml(n.title)}</b>`);
     const body = n.description.length > 600 ? n.description.slice(0, 600) + '…' : n.description;
     parts.push(escapeHtml(body));
   } else {
     parts.push(escapeHtml(n.description));
   }
 
-  // Use direct item URL when available, otherwise fall back to the list page
   const targetUrl = n.resolved_link ?? n.link;
-  parts.push(`<a href="${targetUrl}">Ver en TEC Digital</a>`);
+  parts.push(`🔗 <a href="${targetUrl}">Ver en TEC Digital</a>`);
   return parts.join('\n');
 }
 
-function formatEvaluation(user: User, n: RawNotification): string {
+function formatEvaluation(_user: User, n: RawNotification): string {
   return [
-    `<b>${escapeHtml(n.course)}</b>`,
-    escapeHtml(n.description),
-    `<a href="${n.link}">Evaluación</a>`,
+    `📝 <b>${escapeHtml(n.course)}</b>`,
+    SEPARATOR,
+    `📌 ${escapeHtml(n.description)}`,
+    ``,
+    `🔗 <a href="${n.link}">Ver evaluación en TEC Digital</a>`,
   ].join('\n');
 }
 
-function formatDocumentSent(
-  user: User,
+function formatDocumentLink(_user: User, n: RawNotification): string {
+  return [
+    `📁 <b>${escapeHtml(n.course)}</b>`,
+    SEPARATOR,
+    `📌 ${escapeHtml(n.description)}`,
+    ``,
+    `🔗 <a href="${n.link}">Ver documentos del curso</a>`,
+  ].join('\n');
+}
+
+interface StorageFileInfo {
+  fileName: string;
+  fileId: string;
+  fileUrl?: string;
+}
+
+function formatDocumentsSaved(
+  _user: User,
   n: RawNotification,
-  fileName: string,
-  driveFileId: string,
-  fileUrl?: string,
+  files: StorageFileInfo[],
 ): string {
-  const driveUrl =
-    fileUrl ?? `https://drive.google.com/file/d/${encodeURIComponent(driveFileId)}/view`;
-  return [
-    `<b>${escapeHtml(n.course)}</b>`,
-    escapeHtml(fileName),
-    `<a href="${driveUrl}">Abrir archivo</a>`,
-  ].join('\n');
+  const parts: string[] = [
+    `📁 <b>${escapeHtml(n.course)}</b>`,
+    SEPARATOR,
+    `📌 ${escapeHtml(n.description)}`,
+    ``,
+    `Se agregaron ${files.length} archivo${files.length > 1 ? 's' : ''}:`,
+    ``,
+  ];
+
+  for (const file of files) {
+    const url = file.fileUrl ?? `https://drive.google.com/file/d/${encodeURIComponent(file.fileId)}/view`;
+    parts.push(`📄 ${escapeHtml(file.fileName)}`);
+    parts.push(`└── 📎 <a href="${url}">Abrir archivo</a>`);
+    parts.push('');
+  }
+
+  parts.push(`🔗 <a href="${n.link}">Ver todos los documentos del curso</a>`);
+  return parts.join('\n');
 }
 
-function formatDocumentDownload(
-  user: User,
+function formatDocumentsDownload(
+  _user: User,
   n: RawNotification,
-  fileName: string,
-  url: string,
+  files: FileReference[],
 ): string {
-  return [
-    `<b>${escapeHtml(n.course)}</b>`,
-    escapeHtml(fileName),
-    `<a href="${escapeHtml(url)}">Abrir en Drive</a>`,
-  ].join('\n');
+  const parts: string[] = [
+    `📁 <b>${escapeHtml(n.course)}</b>`,
+    SEPARATOR,
+    `📌 ${escapeHtml(n.description)}`,
+    ``,
+    `Se agregaron ${files.length} archivo${files.length > 1 ? 's' : ''}:`,
+    ``,
+  ];
+
+  for (const file of files) {
+    parts.push(`📄 ${escapeHtml(file.file_name)}`);
+    parts.push(`└── 🔗 <a href="${escapeHtml(file.download_url)}">Descargar</a>`);
+    parts.push('');
+  }
+
+  parts.push(`🔗 <a href="${n.link}">Ver todos los documentos del curso</a>`);
+  return parts.join('\n');
 }
 
-function formatDocumentLink(user: User, n: RawNotification): string {
+function formatDriveAuthExpired(_user: User): string {
   return [
-    `<b>${escapeHtml(n.course)}</b>`,
-    escapeHtml(n.description),
-    `<a href="${n.link}">Documentos del curso</a>`,
-  ].join('\n');
-}
-
-function formatDriveAuthExpired(user: User): string {
-  return [
-    '<b>Atención: autoriza Drive de nuevo</b>',
+    '<b>⚠️ Atención: autoriza Drive de nuevo</b>',
+    '',
     'Tu sesión de Google Drive expiró y no podemos guardar documentos.',
-    'Abre el bot TecBrain y usa /actualizar para volver a enlazar tu cuenta.',
+    '',
+    'Usa <b>/actualizar</b> para volver a enlazar tu cuenta.',
   ].join('\n');
 }
 
-function formatOneDriveAuthExpired(user: User): string {
+function formatOneDriveAuthExpired(_user: User): string {
   return [
-    '<b>Atención: autoriza OneDrive de nuevo</b>',
+    '<b>⚠️ Atención: autoriza OneDrive de nuevo</b>',
+    '',
     'Tu sesión de OneDrive expiró y no podemos guardar documentos.',
-    'Abre el bot TecBrain y usa /almacenamiento para volver a enlazar tu cuenta.',
+    '',
+    'Usa <b>/almacenamiento</b> para volver a enlazar tu cuenta.',
+  ].join('\n');
+}
+
+function formatTecAuthExpired(_user: User): string {
+  return [
+    '<b>⚠️ No pudimos acceder a tu cuenta del TEC Digital</b>',
+    '',
+    'Parece que tu contraseña cambió o ya no es válida.',
+    '',
+    'Por favor, actualiza tus credenciales usando el comando <b>/actualizar</b> para seguir recibiendo notificaciones.',
   ].join('\n');
 }
 
@@ -122,6 +165,33 @@ export class TelegramService {
     await this.sendMessage(user.telegram_chat_id, formatEvaluation(user, n));
   }
 
+  async sendDocumentLink(user: User, n: RawNotification): Promise<void> {
+    await this.sendMessage(user.telegram_chat_id, formatDocumentLink(user, n));
+  }
+
+  async sendDocumentsSaved(
+    user: User,
+    n: RawNotification,
+    files: StorageFileInfo[],
+  ): Promise<void> {
+    await this.sendMessage(
+      user.telegram_chat_id,
+      formatDocumentsSaved(user, n, files),
+    );
+  }
+
+  async sendDocumentsDownload(
+    user: User,
+    n: RawNotification,
+    files: FileReference[],
+  ): Promise<void> {
+    await this.sendMessage(
+      user.telegram_chat_id,
+      formatDocumentsDownload(user, n, files),
+    );
+  }
+
+  // Legacy per-file methods (kept for backward compatibility)
   async sendDocumentSaved(
     user: User,
     n: RawNotification,
@@ -129,9 +199,15 @@ export class TelegramService {
     driveFileId: string,
     fileUrl?: string,
   ): Promise<void> {
+    const url = fileUrl ?? `https://drive.google.com/file/d/${encodeURIComponent(driveFileId)}/view`;
     await this.sendMessage(
       user.telegram_chat_id,
-      formatDocumentSent(user, n, fileName, driveFileId, fileUrl),
+      [
+        `📁 <b>${escapeHtml(n.course)}</b>`,
+        SEPARATOR,
+        `📄 ${escapeHtml(fileName)}`,
+        `└── 📎 <a href="${url}">Abrir archivo</a>`,
+      ].join('\n'),
     );
   }
 
@@ -141,11 +217,15 @@ export class TelegramService {
     fileName: string,
     url: string,
   ): Promise<void> {
-    await this.sendMessage(user.telegram_chat_id, formatDocumentDownload(user, n, fileName, url));
-  }
-
-  async sendDocumentLink(user: User, n: RawNotification): Promise<void> {
-    await this.sendMessage(user.telegram_chat_id, formatDocumentLink(user, n));
+    await this.sendMessage(
+      user.telegram_chat_id,
+      [
+        `📁 <b>${escapeHtml(n.course)}</b>`,
+        SEPARATOR,
+        `📄 ${escapeHtml(fileName)}`,
+        `└── 🔗 <a href="${escapeHtml(url)}">Descargar</a>`,
+      ].join('\n'),
+    );
   }
 
   async sendDriveAuthExpired(user: User): Promise<void> {
@@ -154,5 +234,9 @@ export class TelegramService {
 
   async sendOneDriveAuthExpired(user: User): Promise<void> {
     await this.sendMessage(user.telegram_chat_id, formatOneDriveAuthExpired(user));
+  }
+
+  async sendTecAuthExpired(user: User): Promise<void> {
+    await this.sendMessage(user.telegram_chat_id, formatTecAuthExpired(user));
   }
 }

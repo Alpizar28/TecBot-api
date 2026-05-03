@@ -205,122 +205,130 @@ async function handleDocumentNotification(
     const resolvedCourse = await resolveCourseNameForDrive(notification.course, notification.link);
     const courseFolderId = await storage.ensureFolder(resolvedCourse, storageRootId);
 
-    const results = await Promise.all(
-      notification.files.map(async (file) => {
-        try {
+    const storageFiles: Array<{ fileName: string; fileId: string; fileUrl?: string }> = [];
+    const failedFiles: Array<typeof notification.files[0]> = [];
+    let storageAuthError = false;
+
+    for (const file of notification.files) {
+      try {
+        const fileHash = crypto
+          .createHash('sha256')
+          .update(file.download_url + file.file_name)
+          .digest('hex');
+
+        if (await uploadedFileExists(user.id, fileHash)) {
+          log.info({ fileName: file.file_name }, 'Skipping duplicate document upload');
+          continue;
+        }
+
+        log.info(
+          {
+            fileName: file.file_name,
+            downloadUrl: file.download_url,
+            storageProvider,
+          },
+          'Attempting storage upload',
+        );
+
+        const downloader = async () => {
+          const res = await axios.post<ArrayBuffer>(
+            `${scraperUrl}/download-file`,
+            {
+              username: user.tec_username,
+              password: tecPassword,
+              downloadUrl: file.download_url,
+            },
+            { responseType: 'arraybuffer', timeout: 60_000 },
+          );
+          const contentType =
+            (res.headers['content-type'] as string | undefined) ?? 'application/octet-stream';
+          return { data: res.data, contentType };
+        };
+
+        const { fileId, webUrl } = await storage.downloadAndUpload(
+          downloader,
+          file.file_name,
+          courseFolderId,
+        );
+
+        await insertUploadedFile(user.id, resolvedCourse, fileHash, file.file_name, fileId);
+        storageFiles.push({ fileName: file.file_name, fileId, fileUrl: webUrl });
+      } catch (error) {
+        logStructuredError(user, notification, 'drive_upload', error);
+        if (isDriveAuthError(error)) {
+          storageAuthError = true;
+        }
+        failedFiles.push(file);
+      }
+    }
+
+    if (storageAuthError) {
+      await maybeNotifyStorageAuthExpiration(user, telegram, log);
+    }
+
+    // Send ONE message for all successfully uploaded files
+    if (storageFiles.length > 0) {
+      const notified = await safeTelegram(
+        user,
+        notification,
+        () => telegram.sendDocumentsSaved(user, notification, storageFiles),
+        'telegram_doc_saved',
+      );
+      if (!notified) return false;
+    }
+
+    // Send ONE message for all failed files as fallback
+    if (failedFiles.length > 0) {
+      const notified = await safeTelegram(
+        user,
+        notification,
+        () => telegram.sendDocumentsDownload(user, notification, failedFiles),
+        'telegram_doc_fallback',
+      );
+      if (notified) {
+        for (const file of failedFiles) {
           const fileHash = crypto
             .createHash('sha256')
             .update(file.download_url + file.file_name)
             .digest('hex');
-
-          if (await uploadedFileExists(user.id, fileHash)) {
-            log.info({ fileName: file.file_name }, 'Skipping duplicate document upload');
-            return true;
-          }
-
+          await insertUploadedFile(user.id, resolvedCourse, fileHash, file.file_name, 'fallback');
           log.info(
-            {
-              fileName: file.file_name,
-              downloadUrl: file.download_url,
-              storageProvider,
-            },
-            'Attempting storage upload',
+            { fileName: file.file_name },
+            'Marked document as fallback-sent to prevent duplicate retries',
           );
-
-          // Downloader: proxy the download through the scraper so the active
-          // CookieJar session is used instead of raw exported cookies.
-          const downloader = async () => {
-            const res = await axios.post<ArrayBuffer>(
-              `${scraperUrl}/download-file`,
-              {
-                username: user.tec_username,
-                password: tecPassword,
-                downloadUrl: file.download_url,
-              },
-              { responseType: 'arraybuffer', timeout: 60_000 },
-            );
-            const contentType =
-              (res.headers['content-type'] as string | undefined) ?? 'application/octet-stream';
-            return { data: res.data, contentType };
-          };
-
-          const { fileId, webUrl } = await storage.downloadAndUpload(
-            downloader,
-            file.file_name,
-            courseFolderId,
-          );
-
-          await insertUploadedFile(user.id, resolvedCourse, fileHash, file.file_name, fileId);
-          const notified = await safeTelegram(
-            user,
-            notification,
-            () => telegram.sendDocumentSaved(user, notification, file.file_name, fileId, webUrl),
-            'telegram_doc_saved',
-          );
-          return notified;
-        } catch (error) {
-          logStructuredError(user, notification, 'drive_upload', error);
-          if (isDriveAuthError(error)) {
-            await maybeNotifyStorageAuthExpiration(user, telegram, log);
-          }
-          const notified = await safeTelegram(
-            user,
-            notification,
-            () =>
-              telegram.sendDocumentDownload(user, notification, file.file_name, file.download_url),
-            'telegram_doc_fallback',
-          );
-          if (notified) {
-            // Mark file as processed via fallback so it is not retried next cycle.
-            // Without this, hasPendingUploads stays true and the notification is
-            // re-dispatched every cycle, sending duplicate Telegram messages.
-            const fileHash = crypto
-              .createHash('sha256')
-              .update(file.download_url + file.file_name)
-              .digest('hex');
-            await insertUploadedFile(user.id, resolvedCourse, fileHash, file.file_name, 'fallback');
-            log.info(
-              { fileName: file.file_name },
-              'Marked document as fallback-sent to prevent duplicate retries',
-            );
-          }
-          return notified;
         }
-      }),
-    );
+      }
+      if (!notified && storageFiles.length === 0) return false;
+    }
 
-    return results.every(Boolean);
+    return true;
   }
 
   if (notification.files && notification.files.length > 0) {
-    const results = await Promise.all(
-      notification.files.map(async (file) => {
-        const sent = await safeTelegram(
-          user,
-          notification,
-          () =>
-            telegram.sendDocumentDownload(user, notification, file.file_name, file.download_url),
-          'telegram_doc_download',
-        );
-
-        if (sent) {
-          const fileHash = crypto
-            .createHash('sha256')
-            .update(file.download_url + file.file_name)
-            .digest('hex');
-          await insertUploadedFile(
-            user.id,
-            notification.course,
-            fileHash,
-            file.file_name,
-            'fallback',
-          );
-        }
-
-        return sent;
-      }),
+    const sent = await safeTelegram(
+      user,
+      notification,
+      () => telegram.sendDocumentsDownload(user, notification, notification.files!),
+      'telegram_doc_download',
     );
-    return results.every(Boolean);
+
+    if (sent) {
+      for (const file of notification.files) {
+        const fileHash = crypto
+          .createHash('sha256')
+          .update(file.download_url + file.file_name)
+          .digest('hex');
+        await insertUploadedFile(
+          user.id,
+          notification.course,
+          fileHash,
+          file.file_name,
+          'fallback',
+        );
+      }
+    }
+
+    return sent;
   }
 
   return safeTelegram(

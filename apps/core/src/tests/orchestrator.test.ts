@@ -35,7 +35,7 @@ describe('Telegram message formatters', () => {
     telegram_chat_id: '6317692621',
     drive_root_folder_id: 'folder-id',
     onedrive_root_folder_id: null,
-    storage_provider: 'drive',
+    storage_provider: 'drive' as const,
     is_active: true,
     created_at: new Date(),
   };
@@ -62,6 +62,6 @@ describe('Telegram message formatters', () => {
     const [chatId, message] = mockSend.mock.calls[0] as [string, string];
     expect(chatId).toBe('6317692621');
     expect(message).toContain('Cálculo Superior');
-    expect(message).toContain('Evaluación');
+    expect(message).toContain('Ver evaluación en TEC Digital');
   });
 });

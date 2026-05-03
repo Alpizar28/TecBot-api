@@ -85,10 +85,14 @@ export async function runOrchestrationCycle(): Promise<void> {
       usersTotal: users.length,
       usersProcessed: 0,
       usersFailed: 0,
+      usersAuthFailed: 0,
       notificationsDispatched: 0,
       notificationsProcessed: 0,
       notificationsPartial: 0,
     };
+
+    // Track users already notified about TEC auth expiration this cycle (1 notification per cycle)
+    const tecAuthAlertSent = new Set<string>();
 
     const concurrencyLimit = parseInt(process.env.CORE_CONCURRENCY ?? '3', 10);
     logger.info({ component: 'orchestrator', concurrencyLimit }, 'Using concurrency level');
@@ -104,16 +108,52 @@ export async function runOrchestrationCycle(): Promise<void> {
           cycleStats.notificationsPartial += stats.partial;
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
-          cycleStats.usersFailed += 1;
-          logger.error(
-            {
-              component: 'orchestrator',
-              userId: user.id,
-              action: 'scrape_failed',
-              errorMessage: errorMsg,
-            },
-            'User orchestration failed',
-          );
+          const isAuthError = errorMsg.includes('Session invalid after re-authentication');
+
+          if (isAuthError) {
+            cycleStats.usersAuthFailed += 1;
+            logger.warn(
+              {
+                component: 'orchestrator',
+                userId: user.id,
+                action: 'tec_auth_failed',
+                errorMessage: errorMsg,
+              },
+              'User TEC Digital authentication failed — credentials may have changed',
+            );
+
+            // Notify the user once per cycle
+            if (!tecAuthAlertSent.has(user.id)) {
+              tecAuthAlertSent.add(user.id);
+              try {
+                await telegram.sendTecAuthExpired(user);
+                logger.info(
+                  { component: 'orchestrator', userId: user.id },
+                  'TEC auth expiration notification sent to user',
+                );
+              } catch (notifyErr) {
+                logger.warn(
+                  {
+                    component: 'orchestrator',
+                    userId: user.id,
+                    error: notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+                  },
+                  'Failed to send TEC auth expiration notification to user',
+                );
+              }
+            }
+          } else {
+            cycleStats.usersFailed += 1;
+            logger.error(
+              {
+                component: 'orchestrator',
+                userId: user.id,
+                action: 'scrape_failed',
+                errorMessage: errorMsg,
+              },
+              'User orchestration failed',
+            );
+          }
         }
       }),
     );
@@ -255,6 +295,7 @@ async function evaluateAlerts(cycleStats: {
   usersTotal: number;
   usersProcessed: number;
   usersFailed: number;
+  usersAuthFailed: number;
   notificationsDispatched: number;
   notificationsProcessed: number;
   notificationsPartial: number;

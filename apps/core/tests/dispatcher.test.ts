@@ -64,7 +64,7 @@ describe('dispatch()', () => {
       {
         sendNotice: vi.fn(),
         sendEvaluation: vi.fn(),
-        sendDocumentSaved: vi.fn(),
+        sendDocumentsSaved: vi.fn(),
         sendDocumentLink: vi.fn(),
       } as any,
       null,
@@ -86,7 +86,7 @@ describe('dispatch()', () => {
       {
         sendNotice: vi.fn().mockRejectedValue(new Error('telegram down')),
         sendEvaluation: vi.fn(),
-        sendDocumentSaved: vi.fn(),
+        sendDocumentsSaved: vi.fn(),
         sendDocumentLink: vi.fn(),
       } as any,
       null,
@@ -121,8 +121,8 @@ describe('dispatch()', () => {
     const telegram = {
       sendNotice: vi.fn(),
       sendEvaluation: vi.fn(),
-      sendDocumentSaved: vi.fn(),
-      sendDocumentDownload: vi.fn().mockResolvedValue(undefined),
+      sendDocumentsSaved: vi.fn(),
+      sendDocumentsDownload: vi.fn().mockResolvedValue(undefined),
       sendDocumentLink: vi.fn(),
       sendDriveAuthExpired: vi.fn().mockResolvedValue(undefined),
     } as any;
@@ -156,8 +156,8 @@ describe('dispatch()', () => {
     const telegram = {
       sendNotice: vi.fn(),
       sendEvaluation: vi.fn(),
-      sendDocumentSaved: vi.fn(),
-      sendDocumentDownload: vi.fn().mockResolvedValue(undefined),
+      sendDocumentsSaved: vi.fn(),
+      sendDocumentsDownload: vi.fn().mockResolvedValue(undefined),
       sendDocumentLink: vi.fn(),
       sendDriveAuthExpired: vi.fn(),
     } as any;
