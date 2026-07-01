@@ -7,3 +7,6 @@ data/sessions/
 *.json.local
 .data/
 *.png
+
+# One-off OAuth admin-consent URLs (contain tenant/client IDs)
+*adminconsent*.txt

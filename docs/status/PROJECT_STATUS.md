@@ -4,7 +4,7 @@ Fecha de actualización: 2026-02-28
 
 ## Resumen Ejecutivo
 
-`tec-brain` es un backend monorepo en TypeScript que automatiza la extracción de notificaciones académicas desde TEC Digital y las distribuye por Telegram. Google Drive no está listo: la integración sigue en revisión porque la subida de archivos todavía no funciona.
+`tec-brain` es un backend monorepo en TypeScript que automatiza la extracción de notificaciones académicas desde TEC Digital y las distribuye por Telegram. La subida a Google Drive/OneDrive está implementada y cableada; su éxito depende de tokens OAuth válidos por usuario, con fallback por Telegram cuando falla.
 
 El proyecto está funcional en producción (AWS + Docker) para scraping y Telegram, y actualmente realiza:
 - Login automático al TEC Digital con sesiones persistentes por usuario (API-only JSON).

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import sensible from '@fastify/sensible';
 import helmet from '@fastify/helmet';
@@ -7,6 +8,19 @@ import type { ScrapeResponse } from '@tec-brain/types';
 
 const SESSION_DIR = process.env.SESSION_DIR ?? './data/sessions';
 const SCRAPER_SECRET = process.env.SCRAPER_SECRET;
+
+/**
+ * Constant-time comparison of the request-provided scraper secret against the
+ * expected value. Rejects arrays/undefined and length mismatches.
+ */
+function scraperSecretMatches(provided: unknown): boolean {
+  if (!SCRAPER_SECRET) return true; // dev-only: startup already allowed this
+  if (typeof provided !== 'string') return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(SCRAPER_SECRET);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 let sessionManager: SessionManager;
 
@@ -18,8 +32,15 @@ export function buildServer(): FastifyInstance {
   });
 
   if (!SCRAPER_SECRET) {
+    // Fail closed: refuse to boot with unprotected endpoints outside development.
+    if (process.env.NODE_ENV !== 'development') {
+      throw new Error(
+        'SCRAPER_SECRET is required outside development — refusing to start with unprotected ' +
+          'endpoints. Set the variable, or set NODE_ENV=development to allow an unprotected local run.',
+      );
+    }
     fastify.log.warn(
-      'SCRAPER_SECRET is not set — scraper endpoints are UNPROTECTED. Set this variable in production.',
+      'SCRAPER_SECRET is not set — scraper endpoints are UNPROTECTED (development mode).',
     );
   }
 
@@ -66,7 +87,7 @@ export function buildServer(): FastifyInstance {
       },
     },
     async (request, reply): Promise<ScrapeResponse> => {
-      if (SCRAPER_SECRET && request.headers['x-scraper-secret'] !== SCRAPER_SECRET) {
+      if (!scraperSecretMatches(request.headers['x-scraper-secret'])) {
         return reply.status(401).send({ status: 'error', error: 'Unauthorized' }) as never;
       }
       const { userId } = request.params;
@@ -148,7 +169,7 @@ export function buildServer(): FastifyInstance {
       },
     },
     async (request, reply) => {
-      if (SCRAPER_SECRET && request.headers['x-scraper-secret'] !== SCRAPER_SECRET) {
+      if (!scraperSecretMatches(request.headers['x-scraper-secret'])) {
         return reply.status(401).send({ error: 'Unauthorized' });
       }
       const { username, password, downloadUrl } = request.body;

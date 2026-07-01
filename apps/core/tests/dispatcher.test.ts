@@ -189,7 +189,6 @@ describe('dispatch()', () => {
       {
         sendNotice,
         sendEvaluation: vi.fn(),
-        sendDocumentSaved: vi.fn(),
         sendDocumentLink: vi.fn(),
       } as any,
       null,

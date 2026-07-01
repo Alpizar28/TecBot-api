@@ -51,8 +51,6 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
-const CORE_BASE_URL = process.env.CORE_BASE_URL ?? 'http://core:3002';
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 // We use a minimal session just to satisfy grammy's type system;
@@ -67,10 +65,23 @@ type BotContext = Context & SessionFlavor<SessionData>;
 
 /** Minimum milliseconds between commands from the same chat. */
 const RATE_LIMIT_WINDOW_MS = 3_000;
+/** How often to sweep stale entries so the map does not grow unbounded. */
+const RATE_LIMIT_PRUNE_INTERVAL_MS = 60_000;
 const lastCommandAt = new Map<string, number>();
+let lastPruneAt = 0;
+
+/** Drops entries older than the rate-limit window; runs at most once per interval. */
+function pruneRateLimiter(now: number): void {
+  if (now - lastPruneAt < RATE_LIMIT_PRUNE_INTERVAL_MS) return;
+  lastPruneAt = now;
+  for (const [chatId, ts] of lastCommandAt) {
+    if (now - ts >= RATE_LIMIT_WINDOW_MS) lastCommandAt.delete(chatId);
+  }
+}
 
 function isRateLimited(chatId: string): boolean {
   const now = Date.now();
+  pruneRateLimiter(now);
   const last = lastCommandAt.get(chatId) ?? 0;
   if (now - last < RATE_LIMIT_WINDOW_MS) return true;
   lastCommandAt.set(chatId, now);

@@ -19,7 +19,7 @@ function formatNotice(_user: User, n: RawNotification): string {
   }
 
   const targetUrl = n.resolved_link ?? n.link;
-  parts.push(`🔗 <a href="${targetUrl}">Ver en TEC Digital</a>`);
+  parts.push(`🔗 <a href="${escapeHtml(targetUrl)}">Ver en TEC Digital</a>`);
   return parts.join('\n');
 }
 
@@ -29,7 +29,7 @@ function formatEvaluation(_user: User, n: RawNotification): string {
     SEPARATOR,
     `📌 ${escapeHtml(n.description)}`,
     ``,
-    `🔗 <a href="${n.link}">Ver evaluación en TEC Digital</a>`,
+    `🔗 <a href="${escapeHtml(n.link)}">Ver evaluación en TEC Digital</a>`,
   ].join('\n');
 }
 
@@ -39,7 +39,7 @@ function formatDocumentLink(_user: User, n: RawNotification): string {
     SEPARATOR,
     `📌 ${escapeHtml(n.description)}`,
     ``,
-    `🔗 <a href="${n.link}">Ver documentos del curso</a>`,
+    `🔗 <a href="${escapeHtml(n.link)}">Ver documentos del curso</a>`,
   ].join('\n');
 }
 
@@ -66,11 +66,11 @@ function formatDocumentsSaved(
   for (const file of files) {
     const url = file.fileUrl ?? `https://drive.google.com/file/d/${encodeURIComponent(file.fileId)}/view`;
     parts.push(`📄 ${escapeHtml(file.fileName)}`);
-    parts.push(`└── 📎 <a href="${url}">Abrir archivo</a>`);
+    parts.push(`└── 📎 <a href="${escapeHtml(url)}">Abrir archivo</a>`);
     parts.push('');
   }
 
-  parts.push(`🔗 <a href="${n.link}">Ver todos los documentos del curso</a>`);
+  parts.push(`🔗 <a href="${escapeHtml(n.link)}">Ver todos los documentos del curso</a>`);
   return parts.join('\n');
 }
 
@@ -94,7 +94,7 @@ function formatDocumentsDownload(
     parts.push('');
   }
 
-  parts.push(`🔗 <a href="${n.link}">Ver todos los documentos del curso</a>`);
+  parts.push(`🔗 <a href="${escapeHtml(n.link)}">Ver todos los documentos del curso</a>`);
   return parts.join('\n');
 }
 
@@ -129,7 +129,11 @@ function formatTecAuthExpired(_user: User): string {
 }
 
 function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -188,43 +192,6 @@ export class TelegramService {
     await this.sendMessage(
       user.telegram_chat_id,
       formatDocumentsDownload(user, n, files),
-    );
-  }
-
-  // Legacy per-file methods (kept for backward compatibility)
-  async sendDocumentSaved(
-    user: User,
-    n: RawNotification,
-    fileName: string,
-    driveFileId: string,
-    fileUrl?: string,
-  ): Promise<void> {
-    const url = fileUrl ?? `https://drive.google.com/file/d/${encodeURIComponent(driveFileId)}/view`;
-    await this.sendMessage(
-      user.telegram_chat_id,
-      [
-        `📁 <b>${escapeHtml(n.course)}</b>`,
-        SEPARATOR,
-        `📄 ${escapeHtml(fileName)}`,
-        `└── 📎 <a href="${url}">Abrir archivo</a>`,
-      ].join('\n'),
-    );
-  }
-
-  async sendDocumentDownload(
-    user: User,
-    n: RawNotification,
-    fileName: string,
-    url: string,
-  ): Promise<void> {
-    await this.sendMessage(
-      user.telegram_chat_id,
-      [
-        `📁 <b>${escapeHtml(n.course)}</b>`,
-        SEPARATOR,
-        `📄 ${escapeHtml(fileName)}`,
-        `└── 🔗 <a href="${escapeHtml(url)}">Descargar</a>`,
-      ].join('\n'),
     );
   }
 

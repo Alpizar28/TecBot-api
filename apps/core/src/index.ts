@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import helmet from '@fastify/helmet';
 import cron from 'node-cron';
@@ -27,6 +28,18 @@ import { logger } from './logger.js';
 
 const PORT = parseInt(process.env.PORT ?? '3002', 10);
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE ?? '*/5 * * * *'; // Every 5 min
+
+/**
+ * Constant-time comparison of a request-provided secret against the expected
+ * value. Rejects arrays/undefined and length mismatches without leaking timing.
+ */
+function secretsMatch(provided: unknown, expected: string): boolean {
+  if (typeof provided !== 'string') return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 async function main() {
   logger.info({ component: 'core_startup' }, 'Running database migrations');
@@ -75,9 +88,18 @@ async function main() {
 
   const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
   if (!INTERNAL_API_SECRET) {
+    // Fail closed: refuse to boot with unprotected internal endpoints in
+    // production. Allow it only for local development.
+    if (process.env.NODE_ENV !== 'development') {
+      throw new Error(
+        'INTERNAL_API_SECRET is required outside development — refusing to start with ' +
+          'unprotected /api/run-now and /api/internal-dispatch. Set the variable, or set ' +
+          'NODE_ENV=development to allow an unprotected local run.',
+      );
+    }
     logger.warn(
       { component: 'core_startup' },
-      'INTERNAL_API_SECRET is not set — /api/run-now and /api/internal-dispatch are UNPROTECTED. Set this variable in production.',
+      'INTERNAL_API_SECRET is not set — internal endpoints are UNPROTECTED (development mode).',
     );
   }
 
@@ -85,9 +107,9 @@ async function main() {
     request: import('fastify').FastifyRequest,
     reply: import('fastify').FastifyReply,
   ): boolean {
-    if (!INTERNAL_API_SECRET) return true; // open only in dev; warn already logged above
+    if (!INTERNAL_API_SECRET) return true; // dev-only: startup already allowed this
     const provided = request.headers['x-internal-secret'];
-    if (provided !== INTERNAL_API_SECRET) {
+    if (!secretsMatch(provided, INTERNAL_API_SECRET)) {
       void reply.status(401).send({ status: 'error', error: 'Unauthorized' });
       return false;
     }

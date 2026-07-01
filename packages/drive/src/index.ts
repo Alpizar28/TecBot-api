@@ -154,32 +154,39 @@ export class DriveService {
   /**
    * Build a DriveService from a persisted OAuth token JSON string.
    * The token string must contain at minimum `access_token` and `refresh_token`.
+   *
+   * When `onTokenRefresh` is provided, it is invoked whenever googleapis rotates
+   * the token (via its `tokens` event) with the merged, up-to-date token JSON, so
+   * the caller can persist it. Google usually omits `refresh_token` on refresh, so
+   * the existing one is preserved. Mirrors OneDriveService's refresh persistence.
    */
-  static fromOAuthToken(oauthClient: OAuthClient, tokenJson: string): DriveService {
-    const tokens = JSON.parse(tokenJson);
+  static fromOAuthToken(
+    oauthClient: OAuthClient,
+    tokenJson: string,
+    onTokenRefresh?: (updatedJson: string) => void | Promise<void>,
+  ): DriveService {
+    const tokens = JSON.parse(tokenJson) as Record<string, unknown>;
     const oauth2 = new google.auth.OAuth2(
       oauthClient.clientId,
       oauthClient.clientSecret,
       oauthClient.redirectUri,
     );
     oauth2.setCredentials(tokens);
-    return new DriveService(google.drive({ version: 'v3', auth: oauth2 }));
-  }
-
-  /**
-   * Build a DriveService from a Service Account credentials file.
-   * Note: Service Accounts have no storage quota and cannot upload to personal Drive.
-   * Only use this for Shared Drives (Team Drives).
-   */
-  static fromServiceAccount(credentialsPath: string): DriveService {
-    if (!existsSync(credentialsPath)) {
-      throw new Error(`Google Drive credentials file not found: ${credentialsPath}`);
+    if (onTokenRefresh) {
+      oauth2.on('tokens', (newTokens) => {
+        const merged: Record<string, unknown> = { ...tokens, ...newTokens };
+        if (!merged.refresh_token && tokens.refresh_token) {
+          merged.refresh_token = tokens.refresh_token;
+        }
+        void Promise.resolve(onTokenRefresh(JSON.stringify(merged))).catch((err) => {
+          logger.warn(
+            { component: 'drive_service', error: err instanceof Error ? err.message : String(err) },
+            'Failed to persist refreshed Drive OAuth token',
+          );
+        });
+      });
     }
-    const auth = new google.auth.GoogleAuth({
-      keyFile: credentialsPath,
-      scopes: ['https://www.googleapis.com/auth/drive'],
-    });
-    return new DriveService(google.drive({ version: 'v3', auth }));
+    return new DriveService(google.drive({ version: 'v3', auth: oauth2 }));
   }
 
   private constructor(drive: drive_v3.Drive) {
@@ -423,16 +430,32 @@ async function withRetry<T>(request: () => Promise<T>, endpoint: string): Promis
   throw new Error(`Retry loop exhausted for ${endpoint}`);
 }
 
+// Transient low-level network conditions worth retrying when there is no HTTP
+// status (connection reset, timeout, transient DNS failure).
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+]);
+
 function isRetryableError(error: unknown): boolean {
-  // For googleapis errors, check the HTTP status
-  const maybeStatus =
-    (error as { status?: number; code?: number })?.status ??
-    (error as { status?: number; code?: number })?.code;
-  if (typeof maybeStatus === 'number') {
+  const e = error as { status?: number; code?: number | string };
+  // For googleapis/OneDrive errors, check the HTTP status first.
+  const maybeStatus = typeof e?.status === 'number' ? e.status : undefined;
+  if (maybeStatus !== undefined) {
     return maybeStatus >= 500 || maybeStatus === 408 || maybeStatus === 429;
   }
-  // Unknown error type — retry
-  return true;
+  if (typeof e?.code === 'number') {
+    return e.code >= 500 || e.code === 408 || e.code === 429;
+  }
+  // No HTTP status — retry only known transient network errors.
+  if (typeof e?.code === 'string') {
+    return TRANSIENT_NETWORK_CODES.has(e.code);
+  }
+  // Unknown error type (e.g. a programming bug) — do not retry.
+  return false;
 }
 
 function backoffWithJitter(attempt: number, baseMs: number): number {

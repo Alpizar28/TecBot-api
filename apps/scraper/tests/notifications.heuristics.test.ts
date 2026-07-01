@@ -3,7 +3,6 @@ import {
   classifyType,
   extractCourse,
   ensureAbsoluteUrl,
-  shouldDeleteFromTec,
   buildExternalId,
 } from '../src/extractors/notifications.js';
 
@@ -44,13 +43,6 @@ describe('notifications heuristics', () => {
     expect(ensureAbsoluteUrl('/dotlrn/classes/EL2207')).toBe(
       'https://tecdigital.tec.ac.cr/dotlrn/classes/EL2207',
     );
-  });
-
-  it('deletes in TEC only when dispatch confirms processed true', () => {
-    expect(shouldDeleteFromTec(200, { status: 'success', processed: true })).toBe(true);
-    expect(shouldDeleteFromTec(200, { status: 'success', processed: false })).toBe(false);
-    expect(shouldDeleteFromTec(500, { status: 'success', processed: true })).toBe(false);
-    expect(shouldDeleteFromTec(200, { status: 'error', processed: true })).toBe(false);
   });
 
   describe('buildExternalId — deduplication stability', () => {

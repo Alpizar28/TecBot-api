@@ -4,6 +4,7 @@ import {
   getUserById,
   getDriveOAuthToken,
   getOneDriveOAuthToken,
+  saveDriveOAuthToken,
   saveOneDriveOAuthToken,
   encrypt,
   decrypt,
@@ -31,6 +32,12 @@ const ALERT_USER_FAILURES_THRESHOLD = parseInt(
   10,
 );
 const ADMIN_ALERT_CHAT_ID = process.env.ADMIN_ALERT_CHAT_ID ?? '';
+const ADMIN_ALERT_COOLDOWN_MS =
+  parseInt(process.env.ADMIN_ALERT_COOLDOWN_MINUTES ?? '60', 10) * 60_000;
+
+// Last time each admin-alert kind was sent, to avoid re-notifying every cycle
+// while a persistent failure (e.g. one user with bad credentials) stays broken.
+const adminAlertTimestamps: Record<string, number> = {};
 
 // Singleton Telegram service
 const telegram = new TelegramService(process.env.TELEGRAM_BOT_TOKEN ?? '');
@@ -66,6 +73,15 @@ const endpointMetrics: Record<
   { calls: number; ok: number; failed: number; retries: number; totalMs: number }
 > = {};
 
+// Per-user dispatch tallies for the current cycle. The scraper delivers each
+// notification back via the /api/internal-dispatch callback (handled by
+// handleInternalDispatch), so counts are accumulated there and read by
+// processUser once the scraper call returns. Reset at the start of each cycle.
+const dispatchCounters = new Map<
+  string,
+  { dispatched: number; processed: number; partial: number }
+>();
+
 /**
  * Main orchestration cycle.
  * Fetches active users, calls the scraper, and dispatches each notification.
@@ -76,6 +92,7 @@ export async function runOrchestrationCycle(): Promise<void> {
     return;
   }
   running = true;
+  dispatchCounters.clear();
   logger.info({ component: 'orchestrator' }, 'Starting orchestration cycle');
 
   try {
@@ -186,7 +203,9 @@ export async function handleInternalDispatch(
       const encToken = await getDriveOAuthToken(userId);
       if (encToken) {
         const tokenJson = decrypt(encToken);
-        storage = DriveService.fromOAuthToken(oauthClient, tokenJson);
+        storage = DriveService.fromOAuthToken(oauthClient, tokenJson, async (json) => {
+          await saveDriveOAuthToken(userId, encrypt(json));
+        });
       } else {
         logger.info(
           { component: 'orchestrator', userId },
@@ -231,7 +250,7 @@ export async function handleInternalDispatch(
     }
   }
 
-  return dispatch(
+  const result = await dispatch(
     user,
     notification,
     SCRAPER_URL,
@@ -239,6 +258,18 @@ export async function handleInternalDispatch(
     telegram,
     storage,
   );
+
+  // Tally only real delivery attempts (skip muted/duplicate) so cycle metrics
+  // and the partial-rate alert reflect actual work.
+  if (result.reason === 'processed' || result.reason === 'partial_or_failed') {
+    const c = dispatchCounters.get(userId) ?? { dispatched: 0, processed: 0, partial: 0 };
+    c.dispatched += 1;
+    if (result.reason === 'processed') c.processed += 1;
+    else c.partial += 1;
+    dispatchCounters.set(userId, c);
+  }
+
+  return result;
 }
 
 async function processUser(
@@ -279,16 +310,22 @@ async function processUser(
     throw new Error(response.data.error || 'Unknown scraper error');
   }
 
+  // By the time the scraper call resolves, it has POSTed every notification
+  // back through /api/internal-dispatch, so the counters for this user are final.
+  const counts = dispatchCounters.get(user.id) ?? { dispatched: 0, processed: 0, partial: 0 };
+  dispatchCounters.delete(user.id);
+
   logger.info(
     {
       component: 'orchestrator',
       userId: user.id,
       userName: user.name,
       mode: 'api',
+      ...counts,
     },
     'Sequential scrape finished',
   );
-  return { dispatched: 0, processed: 0, partial: 0 };
+  return counts;
 }
 
 async function evaluateAlerts(cycleStats: {
@@ -305,37 +342,79 @@ async function evaluateAlerts(cycleStats: {
       ? Math.round((cycleStats.notificationsPartial / cycleStats.notificationsDispatched) * 100)
       : 0;
 
-  const messages: string[] = [];
+  const alerts: Array<{ key: string; text: string }> = [];
   if (partialPct >= ALERT_PARTIAL_THRESHOLD_PCT) {
-    messages.push(
-      `ALERTA API-ONLY: notifications_partial=${cycleStats.notificationsPartial}/${cycleStats.notificationsDispatched} (${partialPct}%)`,
-    );
+    alerts.push({
+      key: 'notifications_partial',
+      text: `ALERTA API-ONLY: notifications_partial=${cycleStats.notificationsPartial}/${cycleStats.notificationsDispatched} (${partialPct}%)`,
+    });
   }
   if (cycleStats.usersFailed >= ALERT_USER_FAILURES_THRESHOLD) {
-    messages.push(
-      `ALERTA API-ONLY: users_failed=${cycleStats.usersFailed}/${cycleStats.usersTotal}`,
-    );
+    alerts.push({
+      key: 'users_failed',
+      text: `ALERTA API-ONLY: users_failed=${cycleStats.usersFailed}/${cycleStats.usersTotal}`,
+    });
   }
 
-  if (messages.length === 0) return;
+  if (alerts.length === 0) return;
 
   logger.error(
     {
       component: 'orchestrator',
-      alerts: messages,
+      alerts: alerts.map((a) => a.text),
       cycleStats,
     },
     'Automatic cycle alerts triggered',
   );
 
   if (!ADMIN_ALERT_CHAT_ID) return;
-  try {
-    for (const message of messages) {
-      await telegram.sendMessage(ADMIN_ALERT_CHAT_ID, escapeHtml(message));
+
+  const toSend = selectAlertsToSend(
+    alerts,
+    adminAlertTimestamps,
+    Date.now(),
+    ADMIN_ALERT_COOLDOWN_MS,
+  );
+  for (const alert of alerts) {
+    if (!toSend.includes(alert)) {
+      logger.info(
+        { component: 'orchestrator', alertKey: alert.key },
+        'Admin alert suppressed (within cooldown window)',
+      );
     }
-  } catch (error) {
-    logger.error({ component: 'orchestrator', error }, 'Failed to send admin alert via Telegram');
   }
+  for (const alert of toSend) {
+    try {
+      await telegram.sendMessage(ADMIN_ALERT_CHAT_ID, escapeHtml(alert.text));
+    } catch (error) {
+      logger.error(
+        { component: 'orchestrator', error },
+        'Failed to send admin alert via Telegram',
+      );
+    }
+  }
+}
+
+/**
+ * Given a set of alerts and the last-sent timestamp per alert key, returns the
+ * subset that is outside the cooldown window, and records `now` as their new
+ * last-sent time (mutates `timestamps`). Pure aside from that mutation — no env,
+ * network, or clock reads — so it is directly unit-testable.
+ */
+export function selectAlertsToSend(
+  alerts: Array<{ key: string; text: string }>,
+  timestamps: Record<string, number>,
+  now: number,
+  cooldownMs: number,
+): Array<{ key: string; text: string }> {
+  const toSend: Array<{ key: string; text: string }> = [];
+  for (const alert of alerts) {
+    const lastSent = timestamps[alert.key];
+    if (lastSent !== undefined && now - lastSent < cooldownMs) continue;
+    timestamps[alert.key] = now;
+    toSend.push(alert);
+  }
+  return toSend;
 }
 
 async function requestWithRetry<T>(request: () => Promise<T>, endpoint: string): Promise<T> {
@@ -393,10 +472,23 @@ function serializeEndpointMetrics(): Array<Record<string, unknown>> {
   }));
 }
 
+// Transient low-level network conditions worth retrying when there is no HTTP
+// response (connection reset, timeout, transient DNS failure).
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+]);
+
 function isRetryableHttpError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) return true;
+  if (!axios.isAxiosError(error)) return false; // unknown bug (e.g. TypeError): do not retry
   const status = error.response?.status;
-  if (!status) return true;
+  if (status === undefined) {
+    // No HTTP response — retry only known transient network errors.
+    return error.code !== undefined && TRANSIENT_NETWORK_CODES.has(error.code);
+  }
   return status >= 500 || status === 408 || status === 429;
 }
 

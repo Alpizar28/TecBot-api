@@ -44,53 +44,6 @@ interface EndpointMetric {
 
 type MetricStore = Record<string, EndpointMetric>;
 
-export async function extractNotifications(client: TecHttpClient): Promise<RawNotification[]> {
-  const notifications: RawNotification[] = [];
-  const metrics: MetricStore = {};
-
-  try {
-    extractorLogger.debug('Fetching unread notifications via API');
-    await requestWithRetry(
-      () =>
-        client.client.get(
-          'https://tecdigital.tec.ac.cr/tda-notifications/ajax/has_unread_notifications?',
-        ),
-      {
-        endpoint: 'tec.has_unread_notifications',
-        metrics,
-        logger: extractorLogger,
-      },
-    );
-    const notifRes = await requestWithRetry(
-      () =>
-        client.client.get(
-          'https://tecdigital.tec.ac.cr/tda-notifications/ajax/get_user_notifications?',
-        ),
-      {
-        endpoint: 'tec.get_user_notifications',
-        metrics,
-        logger: extractorLogger,
-      },
-    );
-
-    if (notifRes.status !== 200 || !Array.isArray(notifRes.data?.notifications)) {
-      extractorLogger.warn({ status: notifRes.status }, 'Notification API response is not valid');
-      return notifications;
-    }
-
-    for (const item of notifRes.data.notifications as TecNotificationItem[]) {
-      const parsed = await normalizeNotification(client, item);
-      notifications.push(parsed);
-    }
-  } catch (error) {
-    extractorLogger.error({ error }, 'Failed to fetch notifications');
-  } finally {
-    logMetrics('extractNotifications', metrics);
-  }
-
-  return notifications;
-}
-
 export async function processNotificationsSequentially(
   client: TecHttpClient,
   userId: string,
@@ -590,10 +543,23 @@ async function requestWithRetry<T>(request: () => Promise<T>, context: RetryCont
   throw new Error(`Retry loop exhausted for ${context.endpoint}`);
 }
 
+// Transient low-level network conditions worth retrying when there is no HTTP
+// response (connection reset, timeout, transient DNS failure).
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+]);
+
 function isRetryableHttpError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) return true;
+  if (!axios.isAxiosError(error)) return false; // unknown bug (e.g. TypeError): do not retry
   const status = error.response?.status;
-  if (!status) return true;
+  if (status === undefined) {
+    // No HTTP response — retry only known transient network errors.
+    return error.code !== undefined && TRANSIENT_NETWORK_CODES.has(error.code);
+  }
   return status >= 500 || status === 408 || status === 429;
 }
 
@@ -628,15 +594,6 @@ function logMetrics(flow: string, metrics: MetricStore, extra?: Record<string, u
       endpointMetrics: serialized,
     },
     'HTTP endpoint metrics',
-  );
-}
-
-export function shouldDeleteFromTec(
-  httpStatus: number,
-  dispatchBody: InternalDispatchResponse | undefined,
-): boolean {
-  return (
-    httpStatus === 200 && dispatchBody?.status === 'success' && dispatchBody?.processed === true
   );
 }
 
@@ -795,17 +752,6 @@ function sanitizeFileName(name: string): string {
   return name.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'documento';
 }
 
-function guessFileNameFromUrl(url: string): string | null {
-  try {
-    const parsed = new URL(url);
-    const pathParts = parsed.pathname.split('/').filter(Boolean);
-    const candidate = decodeURIComponent(pathParts[pathParts.length - 1] ?? '');
-    return candidate || null;
-  } catch {
-    return null;
-  }
-}
-
 function extractFolderIdFromHtml(html: string): string | null {
   const patterns = [/folder_id\s*[:=]\s*["']?(\d+)["']?/i, /folderId\s*[:=]\s*["']?(\d+)["']?/i];
 
@@ -845,14 +791,6 @@ function isFileItemLike(value: unknown): boolean {
     'name' in item ||
     'title' in item
   );
-}
-
-function unescapeJsonUrl(value: string): string {
-  return value
-    .replace(/\\u002F/gi, '/')
-    .replace(/\\u0026/gi, '&')
-    .replace(/\\\//g, '/')
-    .replace(/\\&/g, '&');
 }
 
 function inferMimeType(

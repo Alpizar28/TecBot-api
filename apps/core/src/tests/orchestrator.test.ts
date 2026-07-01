@@ -1,4 +1,51 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll } from 'vitest';
+
+// ─── Test: Admin alert cooldown ───────────────────────────────────────────────
+
+describe('selectAlertsToSend', () => {
+  const COOLDOWN = 60 * 60_000; // 60 min
+  const alerts = [{ key: 'users_failed', text: 'users_failed=1/3' }];
+
+  // orchestrator.ts instantiates a TelegramService singleton at import time,
+  // which requires a token — set one before importing the module under test.
+  let selectAlertsToSend: typeof import('../orchestrator.js')['selectAlertsToSend'];
+  beforeAll(async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    ({ selectAlertsToSend } = await import('../orchestrator.js'));
+  });
+
+  it('sends an alert the first time its key is seen', () => {
+    const timestamps: Record<string, number> = {};
+    const toSend = selectAlertsToSend(alerts, timestamps, 1_000, COOLDOWN);
+    expect(toSend).toHaveLength(1);
+    expect(timestamps.users_failed).toBe(1_000);
+  });
+
+  it('suppresses the same alert key within the cooldown window', () => {
+    const timestamps: Record<string, number> = {};
+    selectAlertsToSend(alerts, timestamps, 1_000, COOLDOWN);
+    const second = selectAlertsToSend(alerts, timestamps, 1_000 + COOLDOWN - 1, COOLDOWN);
+    expect(second).toHaveLength(0);
+  });
+
+  it('re-sends the alert once the cooldown has elapsed', () => {
+    const timestamps: Record<string, number> = {};
+    selectAlertsToSend(alerts, timestamps, 1_000, COOLDOWN);
+    const later = selectAlertsToSend(alerts, timestamps, 1_000 + COOLDOWN, COOLDOWN);
+    expect(later).toHaveLength(1);
+    expect(timestamps.users_failed).toBe(1_000 + COOLDOWN);
+  });
+
+  it('tracks cooldowns independently per alert key', () => {
+    const timestamps: Record<string, number> = { users_failed: 1_000 };
+    const mixed = [
+      { key: 'users_failed', text: 'users_failed=1/3' },
+      { key: 'notifications_partial', text: 'notifications_partial=2/5 (40%)' },
+    ];
+    const toSend = selectAlertsToSend(mixed, timestamps, 1_500, COOLDOWN);
+    expect(toSend.map((a) => a.key)).toEqual(['notifications_partial']);
+  });
+});
 
 // ─── Test: Deduplication Logic ────────────────────────────────────────────────
 
@@ -63,5 +110,22 @@ describe('Telegram message formatters', () => {
     expect(chatId).toBe('6317692621');
     expect(message).toContain('Cálculo Superior');
     expect(message).toContain('Ver evaluación en TEC Digital');
+  });
+
+  it('escapes quotes and angle brackets in link URLs to prevent HTML injection', async () => {
+    const mockSend = vi.fn().mockResolvedValue({});
+    const { TelegramService } = await import('@tec-brain/telegram');
+    vi.spyOn(TelegramService.prototype, 'sendMessage').mockImplementation(mockSend);
+
+    const svc = new TelegramService('fake-token');
+    await svc.sendEvaluation(mockUser, {
+      ...mockNotification,
+      link: 'https://evil.example/"><script>alert(1)</script>',
+    });
+
+    const [, message] = mockSend.mock.calls[0] as [string, string];
+    // The raw breakout sequence must not survive into the message.
+    expect(message).not.toContain('"><script>');
+    expect(message).toContain('&quot;&gt;&lt;script&gt;');
   });
 });

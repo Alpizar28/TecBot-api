@@ -1,14 +1,14 @@
 # TEC Brain
 
-Automatización académica para TEC Digital: extrae notificaciones y documentos por API interna y los envía por Telegram. Google Drive no está listo: la integración existe en código, pero la subida de archivos todavía no funciona.
+Automatización académica para TEC Digital: extrae notificaciones y documentos por API interna y los envía por Telegram. La subida de documentos a Google Drive y OneDrive está implementada y cableada en el código, pero depende de que cada usuario tenga un token OAuth válido; mientras no lo tenga, los documentos llegan por Telegram (fallback).
 
 ## Qué hace
 
 - Scrapea TEC Digital por API interna (sesiones HTTP persistentes por usuario).
 - Detecta `noticias`, `evaluaciones` y `documentos`.
 - Envía notificaciones a Telegram.
-- Descarga documentos autenticados y mantiene preparado el flujo de subida a Google Drive, pero Drive no está listo y ese upload todavía no funciona.
-- Mantiene la organización esperada por usuario y curso cuando se reactive Drive.
+- Descarga documentos autenticados y los sube a Google Drive u OneDrive según el `storage_provider` del usuario (requiere token OAuth válido); si falla, usa fallback por Telegram.
+- Organiza los archivos por curso dentro de la carpeta raíz del usuario.
 - Evita duplicados (notificaciones y archivos).
 - Permite ejecución por cron y trigger manual (`/api/run-now`).
 
@@ -227,7 +227,8 @@ Ver reporte amplio en:
 ## Limitaciones conocidas
 
 - El scraping depende de endpoints internos de TEC Digital (pueden cambiar sin previo aviso).
-- Google Drive no está listo. La subida no está funcionando aún y la documentación asume fallback por Telegram para documentos.
+- La subida a Drive/OneDrive depende de tokens OAuth válidos por usuario; ante `invalid_grant`/401 el sistema avisa por Telegram y los documentos siguen llegando como fallback.
+- El estado operativo (guard anti-overlap, métricas, cooldowns de alertas, caché de noticias) es en memoria por proceso: no escala a más de una réplica de `core`.
 - Cobertura de tests aún en expansión.
 - No hay CI/CD formal en el repo actualmente.
 

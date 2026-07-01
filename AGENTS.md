@@ -145,6 +145,9 @@ Read it end to end before touching code; it is the canonical agreement for agent
 - When replaying downloads, rely on `/download-file` so that cookies remain encapsulated in the scraper process.
 - Telegram fallbacks remain the source of truth for documents until Drive uploads succeed; do not delete fallback logic.
 - Drive tokens vencen con frecuencia: si Google responde `invalid_grant`, el dispatcher avisa al usuario vía Telegram (cooldown 12h) para que ejecute `/actualizar`; mantén ese flujo activo al tocar la integración.
+- Core keeps operational state in-process (the `running` overlap guard, `endpointMetrics`, per-cycle `dispatchCounters`, admin-alert cooldowns, and the scraper's `NEWS_CACHE`). This assumes a single `core` replica; running more than one breaks these guarantees. Move such state to Postgres/Redis before scaling horizontally.
+- Admin cycle alerts are deduplicated per alert kind with a cooldown (`ADMIN_ALERT_COOLDOWN_MINUTES`, default 60) so a persistent failure does not spam Telegram every cycle.
+- `INTERNAL_API_SECRET` (core) and `SCRAPER_SECRET` (scraper) are mandatory outside `NODE_ENV=development`; the services refuse to boot without them. The `dev` scripts set `NODE_ENV=development` for local runs.
 - Prefer environment toggles over ad-hoc feature flags; document any new toggle in `.env.example`.
 - When adding monitoring, expose metrics through Fastify routes or logs rather than introducing new dependencies mid-stack.
 - Before cutting a release, rerun migrations and re-encryption helpers locally to ensure drift-free deployments.
