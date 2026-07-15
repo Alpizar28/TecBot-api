@@ -42,7 +42,8 @@ export interface StudyosItemPayload {
   schema_version: 1;
   external_id: string;
   type: string;
-  course: { key: string; code: string; name: string };
+  /** community_key (e.g. "S-2-2026.CA.EL2114.2") lets StudyOS know the term */
+  course: { key: string; code: string; name: string; community_key?: string };
   title: string;
   body: string;
   link: string;
@@ -325,7 +326,12 @@ export function buildEvaluationItemPayload(
     schema_version: 1,
     external_id: ev.external_id,
     type: 'evaluacion',
-    course: { key: `code:${course.code}`, code: course.code, name: course.name },
+    course: {
+      key: `code:${course.code}`,
+      code: course.code,
+      name: course.name,
+      community_key: course.community_key,
+    },
     title: ev.title,
     body: lines.join('\n'),
     link: `${course.url}evaluation/tda-ce-estudiante/tda-index`,
@@ -440,6 +446,90 @@ export async function syncEvaluations(
 /** Test hook: resets the per-user evaluations schedule state. */
 export function resetEvaluationSyncThrottle(): void {
   lastEvalSlot.clear();
+}
+
+// ─── StudyOS alert queue → Telegram ─────────────────────────────────────────
+
+export interface StudyosAlert {
+  id: number;
+  kind: string;
+  payload: {
+    external_id?: string;
+    title?: string;
+    course_id?: string | null;
+    due_date?: string;
+    grade?: string;
+    link?: string;
+  };
+}
+
+const escHtml = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+export function formatStudyosAlert(target: StudyosTarget, alert: StudyosAlert): string {
+  const p = alert.payload ?? {};
+  const title = escHtml(p.title || 'Evaluación');
+  const course = p.course_id ? `<b>${escHtml(p.course_id.toUpperCase())}</b> · ` : '';
+  const linkLine = p.external_id
+    ? `\n🎓 <a href="${escHtml(`${target.url}/hoy?item=${encodeURIComponent(p.external_id)}`)}">Ver en StudyOS</a>`
+    : '';
+  if (alert.kind === 'graded') {
+    const grade = p.grade ? `: <b>${escHtml(p.grade)}</b>` : '';
+    return `📊 ${course}Nota publicada\n${title}${grade}${linkLine}`;
+  }
+  const when = alert.kind === 'due_24h' ? 'en menos de 24 h' : 'en menos de 48 h';
+  const due = p.due_date ? ` — ${escHtml(p.due_date)}` : '';
+  return `⏰ ${course}Entrega ${when}\n${title}${due}${linkLine}`;
+}
+
+/**
+ * Drains the StudyOS alert queue (upcoming deadlines, freshly published
+ * grades) and sends each as a Telegram message. Alerts are acked only after
+ * a successful send, so failures retry next cycle. Never throws.
+ */
+export async function forwardStudyosAlerts(
+  user: User,
+  send: (html: string) => Promise<void>,
+): Promise<void> {
+  const target = getStudyosTarget(user);
+  if (!target) return;
+  const log = logger.child({ component: 'studyos_alerts', userId: user.id });
+
+  try {
+    const res = await studyosFetch(target, '/api/sync/alerts', { method: 'GET' });
+    const { alerts } = (await res.json()) as { alerts: StudyosAlert[] };
+    if (!alerts?.length) return;
+
+    const acked: number[] = [];
+    for (const alert of alerts) {
+      try {
+        await send(formatStudyosAlert(target, alert));
+        acked.push(alert.id);
+      } catch (err) {
+        log.warn(
+          {
+            alertId: alert.id,
+            kind: alert.kind,
+            errorMessage: err instanceof Error ? err.message : String(err),
+          },
+          'StudyOS alert send failed',
+        );
+      }
+    }
+    if (acked.length > 0) {
+      await studyosFetch(target, '/api/sync/alerts/ack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: acked }),
+      });
+    }
+    log.info({ sent: acked.length, total: alerts.length }, 'StudyOS alerts forwarded');
+  } catch (err) {
+    log.warn(
+      { errorMessage: err instanceof Error ? err.message : String(err) },
+      'StudyOS alerts sweep failed',
+    );
+  }
 }
 
 /**

@@ -19,7 +19,12 @@ import {
   type OneDriveOAuthClient,
 } from '@tec-brain/drive';
 import { dispatch, type DispatchResult } from './dispatcher.js';
-import { retryStudyosPending, syncEvaluations, type FileDownloader } from './studyos.js';
+import {
+  forwardStudyosAlerts,
+  retryStudyosPending,
+  syncEvaluations,
+  type FileDownloader,
+} from './studyos.js';
 import pLimit from 'p-limit';
 import type { ScrapeResponse } from '@tec-brain/types';
 import { logger } from './logger.js';
@@ -341,6 +346,11 @@ async function processUser(
       },
       'Evaluations sweep failed',
     ),
+  );
+
+  // Alert queue (upcoming deadlines, published grades) → Telegram.
+  await forwardStudyosAlerts(user, (html) =>
+    telegram.sendMessage(user.telegram_chat_id, html),
   );
 
   const response = await requestWithRetry(

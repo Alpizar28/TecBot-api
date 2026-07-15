@@ -186,6 +186,12 @@ npx tsx scripts/set-studyos.ts "correo@estudiantec.cr" "https://study.ejemplo.de
 
 El token debe coincidir con `STUDYOS_SYNC_TOKEN` de la instancia StudyOS destino.
 
+3. **Alertas → Telegram**: cada ciclo, el core drena la cola de alertas de
+   StudyOS (`GET /api/sync/alerts`: entregas a <48h/<24h y notas recién
+   publicadas) y manda cada una por Telegram con link directo al item;
+   el ack (`POST /api/sync/alerts/ack`) solo cubre las enviadas con éxito,
+   así los fallos se reintentan al ciclo siguiente.
+
 ## Estructura de datos en Drive
 
 Bajo `drive_root_folder_id`, cada curso se crea directamente como subcarpeta:

@@ -91,6 +91,7 @@ describe('buildEvaluationItemPayload()', () => {
       key: 'code:MA2104',
       code: 'MA2104',
       name: 'Cálculo superior GR 1',
+      community_key: 'S-1-2026.CA.MA2104.1',
     });
     expect(payload.link).toBe(`${course.url}evaluation/tda-ce-estudiante/tda-index`);
     expect(payload.evaluation?.due_date).toBe('2026-03-20');
@@ -176,6 +177,69 @@ describe('syncEvaluations()', () => {
     );
 
     expect(scrape).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('forwardStudyosAlerts()', () => {
+  const alertsPayload = {
+    alerts: [
+      { id: 1, kind: 'due_48h', payload: { external_id: 'eval_1', title: 'Q4',
+        course_id: 'ma2104', due_date: '2026-08-02' } },
+      { id: 2, kind: 'graded', payload: { external_id: 'eval_2', title: 'Parcial 2',
+        course_id: 'el2114', grade: '27.3/33.0 pts' } },
+    ],
+  };
+
+  it('sends each alert via Telegram and acks the delivered ones', async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).includes('/api/sync/alerts/ack')) {
+        return new Response('{"acked":2}', { status: 200 });
+      }
+      return new Response(JSON.stringify(alertsPayload), { status: 200 });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const sent: string[] = [];
+    const { forwardStudyosAlerts } = await studyos();
+    await forwardStudyosAlerts(user, async (html) => { sent.push(html); });
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toContain('Entrega en menos de 48 h');
+    expect(sent[0]).toContain('MA2104');
+    expect(sent[1]).toContain('Nota publicada');
+    expect(sent[1]).toContain('27.3/33.0 pts');
+    expect(sent[1]).toContain('hoy?item=eval_2');
+
+    const ackCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/ack'));
+    expect(ackCall).toBeTruthy();
+    expect(JSON.parse(String((ackCall![1] as RequestInit).body))).toEqual({ ids: [1, 2] });
+  });
+
+  it('acks only the alerts that were actually sent', async () => {
+    const fetchMock = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).includes('/ack')) return new Response('{"acked":1}', { status: 200 });
+      return new Response(JSON.stringify(alertsPayload), { status: 200 });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    let calls = 0;
+    const { forwardStudyosAlerts } = await studyos();
+    await forwardStudyosAlerts(user, async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('telegram down');
+    });
+
+    const ackCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/ack'));
+    expect(JSON.parse(String((ackCall![1] as RequestInit).body))).toEqual({ ids: [2] });
+  });
+
+  it('does nothing without StudyOS config', async () => {
+    const fetchMock = stubFetch();
+    const { forwardStudyosAlerts } = await studyos();
+    await forwardStudyosAlerts({ ...user, studyos_url: null }, async () => {
+      throw new Error('should not send');
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
