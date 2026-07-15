@@ -10,6 +10,8 @@ Automatización académica para TEC Digital: extrae notificaciones y documentos 
 - Descarga documentos autenticados y los sube a Google Drive u OneDrive según el `storage_provider` del usuario (requiere token OAuth válido); si falla, usa fallback por Telegram.
 - Organiza los archivos por curso dentro de la carpeta raíz del usuario.
 - Evita duplicados (notificaciones y archivos).
+- Sincroniza cada item con la instancia [StudyOS](https://github.com/Alpizar28/StudyOS) del usuario (webhook con retry).
+- Barre la pestaña **Evaluaciones** de cada curso del semestre actual (rúbrica completa: notas, fechas, pesos, PDFs de enunciados) 3 veces al día y la manda a StudyOS.
 - Permite ejecución por cron y trigger manual (`/api/run-now`).
 
 ## Arquitectura
@@ -74,6 +76,7 @@ Variables clave:
 - `ALERT_USER_FAILURES_THRESHOLD`
 - `ADMIN_ALERT_CHAT_ID` (opcional, alertas Telegram de operación)
 - `SESSION_DIR`
+- `STUDYOS_EVAL_SYNC_HOURS` / `STUDYOS_EVAL_SYNC_TZ` (barrido de Evaluaciones)
 
 Generar `DB_ENCRYPTION_KEY`:
 
@@ -130,6 +133,7 @@ pnpm dev:core
 
 - `GET /health`
 - `POST /process-sequential/:userId`
+- `POST /scrape-evaluations` -> rúbrica de Evaluaciones de todos los cursos del semestre actual
 
 Ejemplo trigger manual:
 
@@ -149,6 +153,38 @@ Qué hace:
 
 - cifra la contraseña del TEC (AES-256-CBC)
 - inserta usuario nuevo o actualiza uno existente por `tec_username`
+
+## Integración StudyOS
+
+TecBot es la capa de adquisición; [StudyOS](https://github.com/Alpizar28/StudyOS) es el
+producto que organiza y muestra los datos. Dos flujos:
+
+1. **Feed de notificaciones**: cada notificación nueva (noticia / evaluación /
+   documento) se reenvía a `POST {studyos_url}/api/sync/items` (schema_version 1,
+   Bearer token por usuario) y sus binarios a `POST /api/sync/files` (multipart).
+   Idempotente por `external_id`; entregas fallidas se registran en la tabla
+   `studyos_dispatch` y se reintentan en cada ciclo de cron (ventana 14 días,
+   máximo 10 intentos).
+
+2. **Barrido de Evaluaciones** (`apps/scraper/src/extractors/evaluations.ts`):
+   descubre los cursos del semestre actual parseando `/dotlrn/` (se queda con el
+   máximo (año, término) del community key, ej. `S-2-2026.CA.EL2114.2`) y baja la
+   rúbrica completa de cada curso (`evaluation/tda-ce-estudiante/tda-index`):
+   categorías con peso, asignaciones con nota y fecha de entrega, y el PDF del
+   enunciado. Corre una vez después de cada hora de `STUDYOS_EVAL_SYNC_HOURS`
+   (default `7,12,17`, zona `STUDYOS_EVAL_SYNC_TZ`, default `America/Costa_Rica`).
+   El barrido es stateless: re-postea todo y StudyOS deduplica y detecta cambios
+   (nota publicada, fecha movida). Solo se adjuntan los PDFs del bloque
+   *Descripción* — las entregas del estudiante y los archivos de
+   retroalimentación nunca salen de TEC Digital.
+
+Configuración por usuario (URL + token cifrado en `users`):
+
+```bash
+npx tsx scripts/set-studyos.ts "correo@estudiantec.cr" "https://study.ejemplo.dev" "TOKEN_SYNC"
+```
+
+El token debe coincidir con `STUDYOS_SYNC_TOKEN` de la instancia StudyOS destino.
 
 ## Estructura de datos en Drive
 
