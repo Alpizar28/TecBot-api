@@ -51,6 +51,12 @@ export {
   saveCycleStats,
   getLastCycleStats,
   type CycleStatsRecord,
+  insertErrorLog,
+  getErrorSummary,
+  countRecentErrors,
+  purgeOldErrors,
+  type ErrorLogEntry,
+  type ErrorGroup,
 } from './queries.js';
 export { runMigrations } from './migrate.js';
 export { encrypt, decrypt, reEncryptLegacyCbcRows } from './crypto.js';

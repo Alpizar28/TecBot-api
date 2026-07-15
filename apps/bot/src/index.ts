@@ -26,6 +26,8 @@ import {
   resolveCourseEntry,
   getAdminStats,
   getLastCycleStats,
+  getErrorSummary,
+  countRecentErrors,
   type RegistrationStep,
 } from '@tec-brain/database';
 import {
@@ -1041,7 +1043,11 @@ async function main() {
       ];
 
       if (stats.dominant_error) {
-        lines.push(`⚠️ <b>Error dominante:</b> <code>${stats.dominant_error}</code>`);
+        lines.push(`⚠️ <b>Error dominante:</b> <code>${escapeHtml(stats.dominant_error)}</code>`);
+      }
+      const errorCount = await countRecentErrors(24).catch(() => 0);
+      if (errorCount > 0) {
+        lines.push(`🧾 <b>Errores últimas 24 h:</b> ${errorCount} — detalle con /errores`);
       }
       if (ageMs > CYCLE_STALE_AFTER_MS) {
         lines.push(
@@ -1056,6 +1062,60 @@ async function main() {
     } catch (err) {
       await ctx.reply('❌ Error al consultar el estado del sistema.');
       logger.error({ err }, '/status error');
+    }
+  });
+
+  // ─── /errores ───────────────────────────────────────────────────────────────
+  // Errores operativos de las últimas 24 h, agrupados y en cristiano — sin
+  // tener que abrir docker logs. Solo admin.
+
+  const escapeHtml = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const ACTION_LABELS: Record<string, string> = {
+    drive_upload: 'Subida a Drive',
+    storage_folder: 'Carpeta de Drive/OneDrive',
+    telegram_notice: 'Envío de noticia por Telegram',
+    telegram_eval: 'Envío de evaluación por Telegram',
+    telegram_doc_saved: 'Aviso de documento guardado',
+    telegram_doc_fallback: 'Envío de links de documento',
+    telegram_doc_download: 'Envío de links de documento',
+    telegram_doc_link: 'Envío de link de documento',
+    dispatch_internal: 'Procesamiento de notificación',
+    studyos_forward: 'Envío a StudyOS',
+    tec_auth_failed: 'Login TEC Digital',
+    scrape_failed: 'Scrape de TEC Digital',
+    drive_auth_alert: 'Aviso de renovación de Drive',
+  };
+
+  bot.command('errores', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return;
+
+    try {
+      const [total, groups] = await Promise.all([countRecentErrors(24), getErrorSummary(24)]);
+
+      if (total === 0) {
+        await ctx.reply('✅ Sin errores en las últimas 24 h.');
+        return;
+      }
+
+      const lines = [`🧾 <b>Errores últimas 24 h:</b> ${total}`, ''];
+      for (const g of groups) {
+        const label = ACTION_LABELS[g.action] ?? g.action;
+        const age = formatAge(Date.now() - new Date(g.last_at).getTime());
+        lines.push(
+          `⚠️ <b>${label}</b> — <code>${escapeHtml(g.error_message.slice(0, 120))}</code>`,
+          `   ×${g.count} · último ${age}`,
+          ``,
+        );
+      }
+      lines.push(`<i>Se conservan 14 días. Agrupados por tipo de error.</i>`);
+
+      await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
+    } catch (err) {
+      await ctx.reply('❌ Error al consultar el registro de errores.');
+      logger.error({ err }, '/errores error');
     }
   });
 
@@ -1085,6 +1145,7 @@ async function main() {
     { command: 'cancelar', description: 'Cancelar el registro en progreso' },
     { command: 'admin', description: 'Panel de administración' },
     { command: 'status', description: 'Salud del último ciclo de scraping (admin)' },
+    { command: 'errores', description: 'Errores de las últimas 24 h (admin)' },
   ]);
 
   logger.info('Starting bot (long polling)');

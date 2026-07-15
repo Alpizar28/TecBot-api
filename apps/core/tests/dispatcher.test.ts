@@ -11,6 +11,7 @@ const db = {
   getCourseMapping: vi.fn().mockResolvedValue(null),
   isAnyCourseMuted: vi.fn(),
   resolveCourseEntry: vi.fn(),
+  insertErrorLog: vi.fn().mockResolvedValue(undefined),
 };
 
 vi.mock('@tec-brain/database', () => db);

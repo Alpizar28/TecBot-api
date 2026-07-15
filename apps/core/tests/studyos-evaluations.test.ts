@@ -7,6 +7,7 @@ const db = {
   markStudyosDelivered: vi.fn().mockResolvedValue(undefined),
   recordStudyosFailure: vi.fn().mockResolvedValue(undefined),
   getPendingStudyosNotifications: vi.fn().mockResolvedValue([]),
+  insertErrorLog: vi.fn().mockResolvedValue(undefined),
   resolveCourseEntry: vi.fn(),
 };
 

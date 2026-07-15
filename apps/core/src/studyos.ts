@@ -14,6 +14,7 @@ import {
   markStudyosDelivered,
   recordStudyosFailure,
   resolveCourseEntry,
+  insertErrorLog,
 } from '@tec-brain/database';
 import type { User, RawNotification, FileReference } from '@tec-brain/types';
 import { logger } from './logger.js';
@@ -223,6 +224,13 @@ export async function forwardNotification(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await recordStudyosFailure(notificationId, message).catch(() => {});
+    void insertErrorLog({
+      user_id: user.id,
+      external_id: notification.external_id,
+      notif_type: notification.type,
+      action: 'studyos_forward',
+      error_message: message,
+    }).catch(() => {});
     log.warn({ errorMessage: message }, 'StudyOS forward failed; will retry next cycle');
   }
 }

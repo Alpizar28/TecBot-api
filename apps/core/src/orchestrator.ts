@@ -7,6 +7,8 @@ import {
   saveDriveOAuthToken,
   saveOneDriveOAuthToken,
   saveCycleStats,
+  insertErrorLog,
+  purgeOldErrors,
   encrypt,
   decrypt,
 } from '@tec-brain/database';
@@ -104,6 +106,7 @@ export async function runOrchestrationCycle(): Promise<void> {
   recentDispatchErrors.length = 0;
   const cycleStartedAt = new Date();
   logger.info({ component: 'orchestrator' }, 'Starting orchestration cycle');
+  await purgeOldErrors(14).catch(() => {});
 
   try {
     const users = await getActiveUsers();
@@ -136,6 +139,12 @@ export async function runOrchestrationCycle(): Promise<void> {
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
           const isAuthError = errorMsg.includes('Session invalid after re-authentication');
+
+          void insertErrorLog({
+            user_id: user.id,
+            action: isAuthError ? 'tec_auth_failed' : 'scrape_failed',
+            error_message: errorMsg,
+          }).catch(() => {});
 
           if (isAuthError) {
             cycleStats.usersAuthFailed += 1;

@@ -10,6 +10,7 @@ import {
   getCourseMapping,
   isAnyCourseMuted,
   resolveCourseEntry,
+  insertErrorLog,
 } from '@tec-brain/database';
 import { TelegramService } from '@tec-brain/telegram';
 import { DriveService, OneDriveService } from '@tec-brain/drive';
@@ -465,6 +466,18 @@ function logStructuredError(
   const errorMsg = err instanceof Error ? err.message : String(err);
   if (recentDispatchErrors.length < RECENT_ERRORS_CAP) {
     recentDispatchErrors.push(`${action}: ${errorMsg}`);
+  }
+  // Persist for /errores — logging must never break the dispatch itself.
+  try {
+    void insertErrorLog({
+      user_id: user.id,
+      external_id: notif.external_id,
+      notif_type: notif.type,
+      action,
+      error_message: errorMsg,
+    }).catch(() => {});
+  } catch {
+    /* ignore */
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const axiosErr = axios.isAxiosError(err) ? (err as any) : null;

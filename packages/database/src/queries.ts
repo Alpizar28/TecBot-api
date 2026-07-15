@@ -889,4 +889,70 @@ export async function getLastCycleStats(): Promise<CycleStatsRecord | null> {
   return res.rows[0] ?? null;
 }
 
+// ─── Error Log (visibilidad operativa para /errores y /status) ───────────────
+
+export interface ErrorLogEntry {
+  user_id?: string | null;
+  external_id?: string | null;
+  notif_type?: string | null;
+  action: string;
+  error_message: string;
+}
+
+export async function insertErrorLog(entry: ErrorLogEntry): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO error_log (user_id, external_id, notif_type, action, error_message)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [
+      entry.user_id ?? null,
+      entry.external_id ?? null,
+      entry.notif_type ?? null,
+      entry.action,
+      entry.error_message.slice(0, 500),
+    ],
+  );
+}
+
+export interface ErrorGroup {
+  action: string;
+  error_message: string;
+  count: number;
+  last_at: Date;
+  sample_external_id: string | null;
+}
+
+/** Errores de las últimas `hours` horas, agrupados por acción + mensaje. */
+export async function getErrorSummary(hours: number, limit = 10): Promise<ErrorGroup[]> {
+  const pool = getPool();
+  const res = await pool.query(
+    `SELECT action, error_message, COUNT(*)::int AS count, MAX(occurred_at) AS last_at,
+            (array_agg(external_id ORDER BY occurred_at DESC))[1] AS sample_external_id
+       FROM error_log
+      WHERE occurred_at > now() - make_interval(hours => $1)
+      GROUP BY action, error_message
+      ORDER BY MAX(occurred_at) DESC
+      LIMIT $2`,
+    [hours, limit],
+  );
+  return res.rows as ErrorGroup[];
+}
+
+export async function countRecentErrors(hours: number): Promise<number> {
+  const pool = getPool();
+  const res = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM error_log
+      WHERE occurred_at > now() - make_interval(hours => $1)`,
+    [hours],
+  );
+  return parseInt(res.rows[0]?.count ?? '0', 10);
+}
+
+export async function purgeOldErrors(days: number): Promise<void> {
+  const pool = getPool();
+  await pool.query(`DELETE FROM error_log WHERE occurred_at < now() - make_interval(days => $1)`, [
+    days,
+  ]);
+}
+
 export type { pg };
