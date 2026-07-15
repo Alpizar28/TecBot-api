@@ -139,6 +139,19 @@ export function buildEvaluationExternalId(
 
 type Node = ReturnType<cheerio.CheerioAPI>;
 
+/**
+ * TEC stores assignment descriptions as HTML that arrives double-escaped
+ * ("&lt;p>Como parte de la incorporaci&amp;oacute;n..."). One decode pass
+ * turns it into HTML, a second parse strips the tags and decodes the
+ * remaining entities.
+ */
+function decodeRichText(text: string): string {
+  if (!/[&][a-z#]+;|&lt;|&amp;/i.test(text)) return text;
+  const decodedOnce = cheerio.load(`<div>${text}</div>`)('div').text();
+  const plain = cheerio.load(`<div>${decodedOnce}</div>`)('div').text();
+  return plain.replace(/\s+/g, ' ').trim();
+}
+
 /** Reads the value node that follows a `p.title_subsection` label matching `labelRe`. */
 function detailValue($: cheerio.CheerioAPI, block: Node, labelRe: RegExp): Node | null {
   let found: Node | null = null;
@@ -199,7 +212,7 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
 
     const description = (() => {
       const value = detailValue($, node, /^Descripción/);
-      const text = value ? $(value).text().replace(/\s+/g, ' ').trim() : '';
+      const text = value ? decodeRichText($(value).text()) : '';
       return /^(No hay descripción|Ver archivo adjunto)/i.test(text) ? '' : text;
     })();
 
@@ -228,13 +241,18 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
       }
     });
 
-    // Statement attachments live in the description column as
-    // href="../../evaluation/view/<name>.pdf?revision_id=N". Student
-    // submissions use different markup (.taskAnswer) and are skipped.
+    // Statement attachments live ONLY in the "Descripción" block as
+    // href="../../evaluation/view/<name>.pdf?revision_id=N". Everything else
+    // under /evaluation/view/ is per-student (submissions, feedback files)
+    // and must not reach StudyOS.
     const files: EvaluationFile[] = [];
     const seen = new Set<string>();
-    node.find('a[href*="/evaluation/view/"]').each((_, a) => {
-      if ($(a).hasClass('taskAnswer') || $(a).closest('.answerStyle').length > 0) return;
+    const descriptionBlock = node
+      .find('p.title_subsection')
+      .filter((_, el) => /^Descripción/.test($(el).text().replace(/\s+/g, ' ').trim()))
+      .first()
+      .parent();
+    descriptionBlock.find('a[href*="/evaluation/view/"]').each((_, a) => {
       const href = $(a).attr('href') ?? '';
       const resolved = resolveEvaluationUrl(href, courseUrl);
       if (!resolved || seen.has(resolved)) return;
