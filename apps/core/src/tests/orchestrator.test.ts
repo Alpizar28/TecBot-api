@@ -1,49 +1,73 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
-// ─── Test: Admin alert cooldown ───────────────────────────────────────────────
+// ─── Test: Admin alert transitions ────────────────────────────────────────────
 
-describe('selectAlertsToSend', () => {
-  const COOLDOWN = 60 * 60_000; // 60 min
+describe('selectAlertTransitions', () => {
+  const REMIND = 6 * 60 * 60_000; // 6 h
   const alerts = [{ key: 'users_failed', text: 'users_failed=1/3' }];
 
   // orchestrator.ts instantiates a TelegramService singleton at import time,
   // which requires a token — set one before importing the module under test.
-  let selectAlertsToSend: typeof import('../orchestrator.js')['selectAlertsToSend'];
+  let selectAlertTransitions: typeof import('../orchestrator.js')['selectAlertTransitions'];
+  let dominantDispatchError: typeof import('../orchestrator.js')['dominantDispatchError'];
   beforeAll(async () => {
     process.env.TELEGRAM_BOT_TOKEN = 'test-token';
-    ({ selectAlertsToSend } = await import('../orchestrator.js'));
+    ({ selectAlertTransitions, dominantDispatchError } = await import('../orchestrator.js'));
   });
 
-  it('sends an alert the first time its key is seen', () => {
-    const timestamps: Record<string, number> = {};
-    const toSend = selectAlertsToSend(alerts, timestamps, 1_000, COOLDOWN);
-    expect(toSend).toHaveLength(1);
-    expect(timestamps.users_failed).toBe(1_000);
+  it('fires an alert the first time its key is seen', () => {
+    const state: Record<string, number> = {};
+    const out = selectAlertTransitions(alerts, state, 1_000, REMIND);
+    expect(out).toEqual([{ key: 'users_failed', text: 'users_failed=1/3', kind: 'fired' }]);
+    expect(state.users_failed).toBe(1_000);
   });
 
-  it('suppresses the same alert key within the cooldown window', () => {
-    const timestamps: Record<string, number> = {};
-    selectAlertsToSend(alerts, timestamps, 1_000, COOLDOWN);
-    const second = selectAlertsToSend(alerts, timestamps, 1_000 + COOLDOWN - 1, COOLDOWN);
+  it('stays silent while the alert persists within the remind window', () => {
+    const state: Record<string, number> = {};
+    selectAlertTransitions(alerts, state, 1_000, REMIND);
+    const second = selectAlertTransitions(alerts, state, 1_000 + REMIND - 1, REMIND);
     expect(second).toHaveLength(0);
   });
 
-  it('re-sends the alert once the cooldown has elapsed', () => {
-    const timestamps: Record<string, number> = {};
-    selectAlertsToSend(alerts, timestamps, 1_000, COOLDOWN);
-    const later = selectAlertsToSend(alerts, timestamps, 1_000 + COOLDOWN, COOLDOWN);
-    expect(later).toHaveLength(1);
-    expect(timestamps.users_failed).toBe(1_000 + COOLDOWN);
+  it('sends a reminder once the remind window elapses', () => {
+    const state: Record<string, number> = {};
+    selectAlertTransitions(alerts, state, 1_000, REMIND);
+    const later = selectAlertTransitions(alerts, state, 1_000 + REMIND, REMIND);
+    expect(later).toEqual([{ key: 'users_failed', text: 'users_failed=1/3', kind: 'reminder' }]);
+    expect(state.users_failed).toBe(1_000 + REMIND);
   });
 
-  it('tracks cooldowns independently per alert key', () => {
-    const timestamps: Record<string, number> = { users_failed: 1_000 };
-    const mixed = [
-      { key: 'users_failed', text: 'users_failed=1/3' },
-      { key: 'notifications_partial', text: 'notifications_partial=2/5 (40%)' },
-    ];
-    const toSend = selectAlertsToSend(mixed, timestamps, 1_500, COOLDOWN);
-    expect(toSend.map((a) => a.key)).toEqual(['notifications_partial']);
+  it('emits a recovery notice when the alert stops firing', () => {
+    const state: Record<string, number> = {};
+    selectAlertTransitions(alerts, state, 1_000, REMIND);
+    const out = selectAlertTransitions([], state, 2_000, REMIND);
+    expect(out).toEqual([{ key: 'users_failed', text: '', kind: 'recovered' }]);
+    expect(state.users_failed).toBeUndefined();
+  });
+
+  it('handles keys independently: one recovers while another fires', () => {
+    const state: Record<string, number> = { users_failed: 1_000 };
+    const out = selectAlertTransitions(
+      [{ key: 'notifications_partial', text: 'partial=2/5 (40%)' }],
+      state,
+      1_500,
+      REMIND,
+    );
+    expect(out.map((t) => [t.key, t.kind])).toEqual([
+      ['users_failed', 'recovered'],
+      ['notifications_partial', 'fired'],
+    ]);
+  });
+
+  it('dominantDispatchError returns the most frequent message with its count', () => {
+    expect(dominantDispatchError([])).toBeNull();
+    expect(
+      dominantDispatchError([
+        'drive_upload: invalid_grant',
+        'telegram_notice: 400',
+        'drive_upload: invalid_grant',
+      ]),
+    ).toBe('drive_upload: invalid_grant (2/3)');
   });
 });
 

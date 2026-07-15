@@ -18,7 +18,7 @@ import {
   type OAuthClient,
   type OneDriveOAuthClient,
 } from '@tec-brain/drive';
-import { dispatch, type DispatchResult } from './dispatcher.js';
+import { dispatch, recentDispatchErrors, type DispatchResult } from './dispatcher.js';
 import {
   forwardStudyosAlerts,
   retryStudyosPending,
@@ -38,11 +38,12 @@ const ALERT_USER_FAILURES_THRESHOLD = parseInt(
   10,
 );
 const ADMIN_ALERT_CHAT_ID = process.env.ADMIN_ALERT_CHAT_ID ?? '';
-const ADMIN_ALERT_COOLDOWN_MS =
-  parseInt(process.env.ADMIN_ALERT_COOLDOWN_MINUTES ?? '60', 10) * 60_000;
+// While a failure stays broken, remind at most this often (default 6 h);
+// otherwise alerts fire only on state transitions (started failing / recovered).
+const ADMIN_ALERT_REMIND_MS =
+  parseInt(process.env.ADMIN_ALERT_COOLDOWN_MINUTES ?? '360', 10) * 60_000;
 
-// Last time each admin-alert kind was sent, to avoid re-notifying every cycle
-// while a persistent failure (e.g. one user with bad credentials) stays broken.
+// key → last-sent ms; a key being present means that alert is currently firing.
 const adminAlertTimestamps: Record<string, number> = {};
 
 // Singleton Telegram service
@@ -99,6 +100,7 @@ export async function runOrchestrationCycle(): Promise<void> {
   }
   running = true;
   dispatchCounters.clear();
+  recentDispatchErrors.length = 0;
   logger.info({ component: 'orchestrator' }, 'Starting orchestration cycle');
 
   try {
@@ -409,48 +411,49 @@ async function evaluateAlerts(cycleStats: {
 
   const alerts: Array<{ key: string; text: string }> = [];
   if (partialPct >= ALERT_PARTIAL_THRESHOLD_PCT) {
+    const dominant = dominantDispatchError(recentDispatchErrors);
     alerts.push({
       key: 'notifications_partial',
-      text: `ALERTA API-ONLY: notifications_partial=${cycleStats.notificationsPartial}/${cycleStats.notificationsDispatched} (${partialPct}%)`,
+      text:
+        `⚠️ ${cycleStats.notificationsPartial}/${cycleStats.notificationsDispatched} notificaciones (${partialPct}%) fallaron y se reintentarán cada ciclo` +
+        (dominant ? `. Error dominante: ${dominant}` : ''),
     });
   }
   if (cycleStats.usersFailed >= ALERT_USER_FAILURES_THRESHOLD) {
     alerts.push({
       key: 'users_failed',
-      text: `ALERTA API-ONLY: users_failed=${cycleStats.usersFailed}/${cycleStats.usersTotal}`,
+      text: `⚠️ ${cycleStats.usersFailed}/${cycleStats.usersTotal} usuarios fallaron el scrape`,
     });
   }
 
-  if (alerts.length === 0) return;
-
-  logger.error(
-    {
-      component: 'orchestrator',
-      alerts: alerts.map((a) => a.text),
-      cycleStats,
-    },
-    'Automatic cycle alerts triggered',
-  );
+  if (alerts.length > 0) {
+    logger.error(
+      {
+        component: 'orchestrator',
+        alerts: alerts.map((a) => a.text),
+        cycleStats,
+      },
+      'Automatic cycle alerts triggered',
+    );
+  }
 
   if (!ADMIN_ALERT_CHAT_ID) return;
 
-  const toSend = selectAlertsToSend(
+  const transitions = selectAlertTransitions(
     alerts,
     adminAlertTimestamps,
     Date.now(),
-    ADMIN_ALERT_COOLDOWN_MS,
+    ADMIN_ALERT_REMIND_MS,
   );
-  for (const alert of alerts) {
-    if (!toSend.includes(alert)) {
-      logger.info(
-        { component: 'orchestrator', alertKey: alert.key },
-        'Admin alert suppressed (within cooldown window)',
-      );
-    }
-  }
-  for (const alert of toSend) {
+  for (const t of transitions) {
+    const text =
+      t.kind === 'recovered'
+        ? `✅ Resuelto: ${t.key} volvió a la normalidad`
+        : t.kind === 'reminder'
+          ? `${t.text} (sigue activo)`
+          : t.text;
     try {
-      await telegram.sendMessage(ADMIN_ALERT_CHAT_ID, escapeHtml(alert.text));
+      await telegram.sendMessage(ADMIN_ALERT_CHAT_ID, escapeHtml(text));
     } catch (error) {
       logger.error(
         { component: 'orchestrator', error },
@@ -460,26 +463,59 @@ async function evaluateAlerts(cycleStats: {
   }
 }
 
+export interface AlertTransition {
+  key: string;
+  text: string;
+  kind: 'fired' | 'reminder' | 'recovered';
+}
+
 /**
- * Given a set of alerts and the last-sent timestamp per alert key, returns the
- * subset that is outside the cooldown window, and records `now` as their new
- * last-sent time (mutates `timestamps`). Pure aside from that mutation — no env,
- * network, or clock reads — so it is directly unit-testable.
+ * State-transition alert selection: an alert is sent once when its key starts
+ * firing, re-sent as a reminder every `remindMs` while it stays active, and a
+ * recovery notice is emitted when it stops firing. `state` maps key → last-sent
+ * ms (presence = currently firing) and is mutated in place. Pure aside from
+ * that mutation — no env, network, or clock reads — so it is unit-testable.
  */
-export function selectAlertsToSend(
-  alerts: Array<{ key: string; text: string }>,
-  timestamps: Record<string, number>,
+export function selectAlertTransitions(
+  active: Array<{ key: string; text: string }>,
+  state: Record<string, number>,
   now: number,
-  cooldownMs: number,
-): Array<{ key: string; text: string }> {
-  const toSend: Array<{ key: string; text: string }> = [];
-  for (const alert of alerts) {
-    const lastSent = timestamps[alert.key];
-    if (lastSent !== undefined && now - lastSent < cooldownMs) continue;
-    timestamps[alert.key] = now;
-    toSend.push(alert);
+  remindMs: number,
+): AlertTransition[] {
+  const out: AlertTransition[] = [];
+  const activeKeys = new Set(active.map((a) => a.key));
+
+  for (const key of Object.keys(state)) {
+    if (!activeKeys.has(key)) {
+      delete state[key];
+      out.push({ key, text: '', kind: 'recovered' });
+    }
   }
-  return toSend;
+
+  for (const alert of active) {
+    const lastSent = state[alert.key];
+    if (lastSent === undefined) {
+      state[alert.key] = now;
+      out.push({ ...alert, kind: 'fired' });
+    } else if (now - lastSent >= remindMs) {
+      state[alert.key] = now;
+      out.push({ ...alert, kind: 'reminder' });
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Most frequent message in the cycle's dispatch-error window, formatted as
+ * "action: message (n/total)". Null when the window is empty.
+ */
+export function dominantDispatchError(errors: readonly string[]): string | null {
+  if (errors.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const e of errors) counts.set(e, (counts.get(e) ?? 0) + 1);
+  const [top, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  return `${top} (${n}/${errors.length})`;
 }
 
 async function requestWithRetry<T>(request: () => Promise<T>, endpoint: string): Promise<T> {

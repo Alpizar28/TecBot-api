@@ -140,6 +140,70 @@ describe('dispatch()', () => {
     expect(telegram.sendDriveAuthExpired).toHaveBeenCalledTimes(1);
   });
 
+  it('degrades to links fallback and persists when ensureFolder dies with auth error', async () => {
+    // Fresh user id: the drive-auth reminder cooldown is keyed per user at
+    // module level, and 'u1' already consumed it in the previous test.
+    const userWithDrive: User = {
+      ...user,
+      id: 'u2',
+      drive_root_folder_id: 'root123',
+      storage_provider: 'drive',
+    };
+
+    const docNotification: RawNotification = {
+      ...notification,
+      type: 'documento',
+      files: [
+        {
+          file_name: 'archivo.pdf',
+          download_url: 'https://tecdigital.tec.ac.cr/file.pdf',
+        },
+      ],
+    } as RawNotification;
+
+    db.getNotificationState.mockResolvedValue({ exists: false, document_status: null });
+    db.uploadedFileExists.mockResolvedValue(false);
+    db.insertUploadedFile.mockResolvedValue(undefined);
+
+    const telegram = {
+      sendNotice: vi.fn(),
+      sendEvaluation: vi.fn(),
+      sendDocumentsSaved: vi.fn(),
+      sendDocumentsDownload: vi.fn().mockResolvedValue(undefined),
+      sendDocumentLink: vi.fn(),
+      sendDriveAuthExpired: vi.fn().mockResolvedValue(undefined),
+    } as any;
+
+    const drive = {
+      ensureFolder: vi.fn().mockRejectedValue(new Error('invalid_grant')),
+      downloadAndUpload: vi.fn(),
+    } as any;
+
+    const { dispatch } = await import('../src/dispatcher.js');
+    const result = await dispatch(
+      userWithDrive,
+      docNotification,
+      'http://scraper',
+      '',
+      telegram,
+      drive,
+    );
+
+    // The dispatch must succeed via the links fallback, not fail-and-retry forever.
+    expect(result).toEqual({ processed: true, reason: 'processed' });
+    expect(telegram.sendDocumentsDownload).toHaveBeenCalledTimes(1);
+    expect(telegram.sendDriveAuthExpired).toHaveBeenCalledTimes(1);
+    expect(drive.downloadAndUpload).not.toHaveBeenCalled();
+    expect(db.insertNotification).toHaveBeenCalledTimes(1);
+    expect(db.insertUploadedFile).toHaveBeenCalledWith(
+      userWithDrive.id,
+      docNotification.course,
+      expect.any(String),
+      'archivo.pdf',
+      'fallback',
+    );
+  });
+
   it('marks document fallback when drive disabled', async () => {
     const docNotification: RawNotification = {
       ...notification,

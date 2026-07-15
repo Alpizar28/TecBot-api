@@ -224,7 +224,20 @@ async function handleDocumentNotification(
 
   if (storage && storageRootId && notification.files && notification.files.length > 0) {
     const resolvedCourse = await resolveCourseNameForDrive(notification.course, notification.link);
-    const courseFolderId = await storage.ensureFolder(resolvedCourse, storageRootId);
+
+    let courseFolderId: string;
+    try {
+      courseFolderId = await storage.ensureFolder(resolvedCourse, storageRootId);
+    } catch (error) {
+      // Storage being unavailable (typically an expired OAuth grant) must not
+      // sink the whole dispatch: degrade to sending the download links so the
+      // notification still reaches the user and gets persisted.
+      logStructuredError(user, notification, 'storage_folder', error);
+      if (isDriveAuthError(error)) {
+        await maybeNotifyStorageAuthExpiration(user, telegram, log);
+      }
+      return sendLinksFallback(user, notification, telegram);
+    }
 
     const storageFiles: Array<{ fileName: string; fileId: string; fileUrl?: string }> = [];
     const failedFiles: Array<typeof notification.files[0]> = [];
@@ -326,30 +339,7 @@ async function handleDocumentNotification(
   }
 
   if (notification.files && notification.files.length > 0) {
-    const sent = await safeTelegram(
-      user,
-      notification,
-      () => telegram.sendDocumentsDownload(user, notification, notification.files!),
-      'telegram_doc_download',
-    );
-
-    if (sent) {
-      for (const file of notification.files) {
-        const fileHash = crypto
-          .createHash('sha256')
-          .update(file.download_url + file.file_name)
-          .digest('hex');
-        await insertUploadedFile(
-          user.id,
-          notification.course,
-          fileHash,
-          file.file_name,
-          'fallback',
-        );
-      }
-    }
-
-    return sent;
+    return sendLinksFallback(user, notification, telegram);
   }
 
   return safeTelegram(
@@ -358,6 +348,35 @@ async function handleDocumentNotification(
     () => telegram.sendDocumentLink(user, notification),
     'telegram_doc_link',
   );
+}
+
+/**
+ * No-storage path for document notifications: send the raw download links via
+ * Telegram and mark the files as fallback-delivered so they are not retried.
+ */
+async function sendLinksFallback(
+  user: User,
+  notification: RawNotification,
+  telegram: TelegramService,
+): Promise<boolean> {
+  const sent = await safeTelegram(
+    user,
+    notification,
+    () => telegram.sendDocumentsDownload(user, notification, notification.files!),
+    'telegram_doc_download',
+  );
+
+  if (sent) {
+    for (const file of notification.files!) {
+      const fileHash = crypto
+        .createHash('sha256')
+        .update(file.download_url + file.file_name)
+        .digest('hex');
+      await insertUploadedFile(user.id, notification.course, fileHash, file.file_name, 'fallback');
+    }
+  }
+
+  return sent;
 }
 
 function isDriveAuthError(err: unknown): boolean {
@@ -432,6 +451,11 @@ async function maybeNotifyStorageAuthExpiration(
   }
 }
 
+// Rolling window of dispatch error messages for the current cycle; the
+// orchestrator clears it each cycle and quotes the dominant one in admin alerts.
+export const recentDispatchErrors: string[] = [];
+const RECENT_ERRORS_CAP = 50;
+
 function logStructuredError(
   user: User,
   notif: RawNotification,
@@ -439,6 +463,9 @@ function logStructuredError(
   err: unknown,
 ): void {
   const errorMsg = err instanceof Error ? err.message : String(err);
+  if (recentDispatchErrors.length < RECENT_ERRORS_CAP) {
+    recentDispatchErrors.push(`${action}: ${errorMsg}`);
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const axiosErr = axios.isAxiosError(err) ? (err as any) : null;
   const axiosDetails = axiosErr
