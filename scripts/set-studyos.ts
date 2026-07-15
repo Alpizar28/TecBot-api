@@ -13,9 +13,12 @@
  */
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
+import path from 'node:path';
 
+// process.argv[1] = ruta de este script; funciona igual en ESM y CJS
+// (import.meta no está permitido cuando tsx compila a CommonJS).
 const requireFromDatabase = createRequire(
-  new URL('../packages/database/package.json', import.meta.url),
+  path.resolve(path.dirname(process.argv[1] ?? '.'), '../packages/database/package.json'),
 );
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pg = requireFromDatabase('pg') as typeof import('pg');
