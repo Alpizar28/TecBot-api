@@ -57,6 +57,11 @@ export {
   purgeOldErrors,
   type ErrorLogEntry,
   type ErrorGroup,
+  getStudyosDeliveryStats,
+  updateUserStudyos,
+  clearUserStudyos,
+  type StudyosDeliveryStats,
+  type StudyosFailurePolicy,
 } from './queries.js';
 export { runMigrations } from './migrate.js';
 export { encrypt, decrypt, reEncryptLegacyCbcRows } from './crypto.js';

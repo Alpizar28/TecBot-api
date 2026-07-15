@@ -404,7 +404,9 @@ export type RegistrationStep =
   | 'update_awaiting_password'
   | 'update_awaiting_drive'
   | 'storage_awaiting_drive_folder'
-  | 'storage_awaiting_onedrive_folder';
+  | 'storage_awaiting_onedrive_folder'
+  | 'studyos_awaiting_url'
+  | 'studyos_awaiting_token';
 
 export interface PendingRegistration {
   id: string;
@@ -414,6 +416,7 @@ export interface PendingRegistration {
   tec_password_enc: string | null;
   drive_folder_id: string | null;
   onedrive_folder_id: string | null;
+  studyos_url: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -489,6 +492,7 @@ export async function advancePendingRegistration(
     tec_password_enc?: string;
     drive_folder_id?: string | null;
     onedrive_folder_id?: string | null;
+    studyos_url?: string | null;
   },
 ): Promise<void> {
   const pool = getPool();
@@ -499,6 +503,7 @@ export async function advancePendingRegistration(
          tec_password_enc = COALESCE($4, tec_password_enc),
          drive_folder_id  = COALESCE($5, drive_folder_id),
          onedrive_folder_id = COALESCE($6, onedrive_folder_id),
+         studyos_url      = COALESCE($7, studyos_url),
          updated_at       = NOW()
      WHERE chat_id = $1`,
     [
@@ -508,6 +513,7 @@ export async function advancePendingRegistration(
       data.tec_password_enc ?? null,
       data.drive_folder_id ?? null,
       data.onedrive_folder_id ?? null,
+      data.studyos_url ?? null,
     ],
   );
 }
@@ -801,18 +807,39 @@ export async function markStudyosDelivered(notificationId: string): Promise<void
   );
 }
 
+export interface StudyosFailurePolicy {
+  /** Error definitivo (payload inválido, 404…): no volver a intentar nunca. */
+  permanent?: boolean;
+}
+
+/**
+ * Registra un fallo de entrega a StudyOS. El backoff exponencial se calcula
+ * aquí (única fuente de verdad): 5 min · 2^attempts, tope 6 h. Los fallos
+ * permanentes quedan fuera del retry para siempre.
+ */
 export async function recordStudyosFailure(
   notificationId: string,
   error: string,
+  policy: StudyosFailurePolicy = {},
 ): Promise<void> {
   const pool = getPool();
+  const permanent = policy.permanent ?? false;
   await pool.query(
-    `INSERT INTO studyos_dispatch (notification_id, delivered_at, attempts, last_error)
-     VALUES ($1, NULL, 1, $2)
+    `INSERT INTO studyos_dispatch (notification_id, delivered_at, attempts, last_error, next_retry_at, permanent)
+     VALUES ($1, NULL, 1, $2,
+             CASE WHEN $3 THEN NULL ELSE now() + interval '5 minutes' END, $3)
      ON CONFLICT (notification_id) DO UPDATE
        SET attempts = studyos_dispatch.attempts + 1,
-           last_error = $2`,
-    [notificationId, error.slice(0, 500)],
+           last_error = $2,
+           permanent = studyos_dispatch.permanent OR $3,
+           next_retry_at = CASE
+             WHEN studyos_dispatch.permanent OR $3 THEN NULL
+             ELSE now() + LEAST(
+               interval '6 hours',
+               interval '5 minutes' * pow(2, LEAST(studyos_dispatch.attempts, 10))
+             )
+           END`,
+    [notificationId, error.slice(0, 500), permanent],
   );
 }
 
@@ -833,12 +860,72 @@ export async function getPendingStudyosNotifications(
        LEFT JOIN studyos_dispatch d ON d.notification_id = n.id
       WHERE n.user_id = $1
         AND n.sent_at > now() - interval '14 days'
-        AND (d.notification_id IS NULL OR (d.delivered_at IS NULL AND d.attempts < $2))
+        AND (d.notification_id IS NULL
+             OR (d.delivered_at IS NULL
+                 AND d.attempts < $2
+                 AND NOT d.permanent
+                 AND (d.next_retry_at IS NULL OR d.next_retry_at <= now())))
       ORDER BY n.sent_at
       LIMIT $3`,
     [userId, maxAttempts, limit],
   );
   return res.rows;
+}
+
+/** Estado de entregas a StudyOS de un usuario, para el comando /studyos. */
+export interface StudyosDeliveryStats {
+  delivered_24h: number;
+  pending: number;
+  failed_permanent: number;
+  last_error: string | null;
+  last_error_at: Date | null;
+}
+
+export async function getStudyosDeliveryStats(userId: string): Promise<StudyosDeliveryStats> {
+  const pool = getPool();
+  const res = await pool.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE d.delivered_at > now() - interval '24 hours')::int AS delivered_24h,
+       COUNT(*) FILTER (WHERE d.delivered_at IS NULL AND NOT d.permanent
+                          AND n.sent_at > now() - interval '14 days')::int AS pending,
+       COUNT(*) FILTER (WHERE d.permanent)::int AS failed_permanent,
+       (array_agg(d.last_error ORDER BY n.sent_at DESC)
+          FILTER (WHERE d.delivered_at IS NULL AND d.last_error IS NOT NULL))[1] AS last_error,
+       MAX(n.sent_at) FILTER (WHERE d.delivered_at IS NULL AND d.last_error IS NOT NULL) AS last_error_at
+       FROM studyos_dispatch d
+       JOIN notifications n ON n.id = d.notification_id
+      WHERE n.user_id = $1`,
+    [userId],
+  );
+  const row = res.rows[0] ?? {};
+  return {
+    delivered_24h: row.delivered_24h ?? 0,
+    pending: row.pending ?? 0,
+    failed_permanent: row.failed_permanent ?? 0,
+    last_error: row.last_error ?? null,
+    last_error_at: row.last_error_at ?? null,
+  };
+}
+
+/** Configura (o reconfigura) el destino StudyOS de un usuario. */
+export async function updateUserStudyos(
+  chatId: string,
+  studyosUrl: string,
+  studyosTokenEnc: string,
+): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE users SET studyos_url = $2, studyos_token_enc = $3 WHERE telegram_chat_id = $1`,
+    [chatId, studyosUrl, studyosTokenEnc],
+  );
+}
+
+export async function clearUserStudyos(chatId: string): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `UPDATE users SET studyos_url = NULL, studyos_token_enc = NULL WHERE telegram_chat_id = $1`,
+    [chatId],
+  );
 }
 
 // ─── Cycle Stats (último ciclo del orquestador, para /status) ────────────────

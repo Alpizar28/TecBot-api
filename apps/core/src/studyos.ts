@@ -109,21 +109,56 @@ export function buildItemPayload(
   };
 }
 
+/** HTTP error from the StudyOS API, carrying the status for retry policy. */
+export class StudyosHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'StudyosHttpError';
+  }
+}
+
+/**
+ * Whether a delivery failure is permanent (retrying will never succeed:
+ * malformed payload, unknown route…) or transient (network, 5xx, target
+ * down, bad token that the user may still fix).
+ */
+export function isPermanentDeliveryError(err: unknown): boolean {
+  if (!(err instanceof StudyosHttpError)) return false;
+  return [400, 404, 405, 410, 413, 415, 422].includes(err.status);
+}
+
 async function studyosFetch(
   target: StudyosTarget,
   path: string,
   init: RequestInit,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<Response> {
   const res = await fetch(`${target.url}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${target.token}`, ...(init.headers ?? {}) },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`StudyOS ${path} -> HTTP ${res.status}: ${body.slice(0, 200)}`);
+    throw new StudyosHttpError(res.status, `StudyOS ${path} -> HTTP ${res.status}: ${body.slice(0, 200)}`);
   }
   return res;
+}
+
+/**
+ * Connectivity + credentials probe against GET /api/sync/ping. Used by the
+ * bot's /studyos onboarding before persisting a URL+token pair.
+ */
+export async function pingStudyos(target: StudyosTarget): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await studyosFetch(target, '/api/sync/ping', { method: 'GET' }, 10_000);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 export async function postItem(target: StudyosTarget, payload: StudyosItemPayload): Promise<void> {
@@ -223,15 +258,21 @@ export async function forwardNotification(
     log.info('Forwarded to StudyOS');
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await recordStudyosFailure(notificationId, message).catch(() => {});
+    const permanent = isPermanentDeliveryError(err);
+    await recordStudyosFailure(notificationId, message, { permanent }).catch(() => {});
     void insertErrorLog({
       user_id: user.id,
       external_id: notification.external_id,
       notif_type: notification.type,
-      action: 'studyos_forward',
+      action: permanent ? 'studyos_forward_permanent' : 'studyos_forward',
       error_message: message,
     }).catch(() => {});
-    log.warn({ errorMessage: message }, 'StudyOS forward failed; will retry next cycle');
+    log.warn(
+      { errorMessage: message, permanent },
+      permanent
+        ? 'StudyOS forward failed permanently; giving up on this item'
+        : 'StudyOS forward failed; will retry with backoff',
+    );
   }
 }
 
@@ -562,11 +603,16 @@ export async function retryStudyosPending(user: User): Promise<void> {
       await markStudyosDelivered(n.id);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await recordStudyosFailure(n.id, message).catch(() => {});
-      log.warn(
-        { externalId: n.external_id, errorMessage: message },
-        'StudyOS retry failed',
-      );
+      const permanent = isPermanentDeliveryError(err);
+      await recordStudyosFailure(n.id, message, { permanent }).catch(() => {});
+      void insertErrorLog({
+        user_id: user.id,
+        external_id: n.external_id,
+        notif_type: n.type,
+        action: permanent ? 'studyos_forward_permanent' : 'studyos_forward',
+        error_message: message,
+      }).catch(() => {});
+      log.warn({ externalId: n.external_id, errorMessage: message, permanent }, 'StudyOS retry failed');
     }
   }
 }

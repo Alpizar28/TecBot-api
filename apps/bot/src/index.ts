@@ -5,6 +5,7 @@ import { pino } from 'pino';
 import {
   runMigrations,
   encrypt,
+  decrypt,
   createUser,
   updateUser,
   getPendingRegistration,
@@ -28,6 +29,9 @@ import {
   getLastCycleStats,
   getErrorSummary,
   countRecentErrors,
+  getStudyosDeliveryStats,
+  updateUserStudyos,
+  clearUserStudyos,
   type RegistrationStep,
 } from '@tec-brain/database';
 import {
@@ -112,6 +116,40 @@ function isTecEmail(value: string): boolean {
 
 function isValidOneDriveFolderId(value: string): boolean {
   return value.trim().length >= 6 && !value.trim().includes(' ');
+}
+
+/** Escapa texto arbitrario que se interpola en mensajes HTML de Telegram. */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** Normaliza una URL de StudyOS (https, sin slash final) o null si no es válida. */
+function parseStudyosUrl(input: string): string | null {
+  const raw = input.trim().replace(/\/+$/, '');
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || !url.hostname.includes('.')) return null;
+    return url.origin + url.pathname.replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Prueba URL+token contra GET /api/sync/ping antes de guardar nada.
+ * Réplica mínima del pingStudyos del core — el bot no depende de apps/core.
+ */
+async function pingStudyosUrl(url: string, token: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${url}/api/sync/ping`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 interface CourseFilterEntry {
@@ -436,10 +474,32 @@ async function main() {
       await ctx.editMessageText('✅ Almacenamiento desactivado. Solo recibirás Telegram.');
     });
 
+  const studyosMenu = new Menu<BotContext>('studyos-menu')
+    .text('🔄 Reconfigurar', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      await upsertPendingRegistrationWithStep(chatId, 'studyos_awaiting_url');
+      await ctx.editMessageText(
+        `🔗 <b>Conectar StudyOS</b>\n\n` +
+          `Envíame la <b>URL</b> de tu instancia de StudyOS.\n\n` +
+          `<i>Ejemplo: https://study.alpizar.dev</i>`,
+        { parse_mode: 'HTML' },
+      );
+    })
+    .row()
+    .text('🔌 Desconectar', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      await clearUserStudyos(chatId);
+      await ctx.editMessageText(
+        '✅ StudyOS desconectado. Tus notificaciones ya no se enviarán ahí.\n' +
+          'Podés reconectarlo cuando quieras con /studyos.',
+      );
+    });
+
   bot.use(confirmMenu);
   bot.use(skipDriveMenu);
   bot.use(updateMenu);
   bot.use(storageMenu);
+  bot.use(studyosMenu);
 
   // ─── Filters Menu ──────────────────────────────────────────────────────────
 
@@ -629,6 +689,8 @@ async function main() {
       update_awaiting_drive: 'Actualizando la carpeta de Google Drive',
       storage_awaiting_drive_folder: 'Configurando Google Drive',
       storage_awaiting_onedrive_folder: 'Configurando OneDrive',
+      studyos_awaiting_url: 'Conectando StudyOS (esperando URL)',
+      studyos_awaiting_token: 'Conectando StudyOS (esperando token)',
     };
 
     await ctx.reply(
@@ -670,6 +732,80 @@ async function main() {
       `📦 <b>Almacenamiento actual:</b> ${providerLabel}\n\n` +
         'Elige dónde quieres guardar los documentos:',
       { parse_mode: 'HTML', reply_markup: storageMenu },
+    );
+  });
+
+  // ─── /studyos ───────────────────────────────────────────────────────────────
+  // Conectar/ver la integración con StudyOS: estado de entregas + ping en
+  // vivo si ya está configurada, o flujo guiado URL → token con prueba de
+  // conexión real antes de guardar (token cifrado, nunca en texto plano).
+
+  bot.command('studyos', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    if (isRateLimited(chatId)) return;
+    const user = await getUserByTelegramChatId(chatId);
+
+    if (!user) {
+      await ctx.reply('❌ No tienes una cuenta registrada. Envía /start para comenzar.');
+      return;
+    }
+
+    const pending = await getPendingRegistration(chatId);
+    if (pending && pending.step !== 'done' && !pending.step.startsWith('studyos_')) {
+      await ctx.reply(
+        '⚠️ Tienes un registro en progreso. Completa ese flujo o envía /cancelar antes de configurar StudyOS.',
+      );
+      return;
+    }
+
+    if (!user.studyos_url || !user.studyos_token_enc) {
+      await upsertPendingRegistrationWithStep(chatId, 'studyos_awaiting_url');
+      await ctx.reply(
+        `🔗 <b>Conectar StudyOS</b>\n\n` +
+          `Tus notificaciones de TEC Digital pueden sincronizarse a una instancia de StudyOS.\n\n` +
+          `📍 <b>Paso 1 de 2</b>\n` +
+          `Envíame la <b>URL</b> de tu instancia.\n\n` +
+          `<i>Ejemplo: https://study.alpizar.dev</i>`,
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    // Ya configurado: estado en vivo.
+    let pingLine = '⏳ Probando conexión…';
+    try {
+      const ping = await pingStudyosUrl(user.studyos_url, decrypt(user.studyos_token_enc));
+      pingLine = ping.ok
+        ? '🟢 <b>Conexión:</b> OK'
+        : `🔴 <b>Conexión:</b> falla (<code>${escapeHtml(ping.error ?? 'desconocido')}</code>)`;
+    } catch {
+      pingLine = '🔴 <b>Conexión:</b> no se pudo descifrar el token — reconfigura.';
+    }
+
+    const stats = await getStudyosDeliveryStats(user.id).catch(() => null);
+    const statsLines = stats
+      ? [
+          `📬 <b>Entregadas últimas 24 h:</b> ${stats.delivered_24h}`,
+          `⏳ <b>Pendientes de reintento:</b> ${stats.pending}`,
+          ...(stats.failed_permanent > 0
+            ? [`🚫 <b>Descartadas (error definitivo):</b> ${stats.failed_permanent}`]
+            : []),
+          ...(stats.last_error
+            ? [`⚠️ <b>Último error:</b> <code>${escapeHtml(stats.last_error.slice(0, 120))}</code>`]
+            : []),
+        ]
+      : ['⚠️ No pude leer las estadísticas de entrega.'];
+
+    await ctx.reply(
+      [
+        `🔗 <b>StudyOS</b>`,
+        ``,
+        `🌐 <b>URL:</b> ${user.studyos_url}`,
+        pingLine,
+        ``,
+        ...statsLines,
+      ].join('\n'),
+      { parse_mode: 'HTML', reply_markup: studyosMenu },
     );
   });
 
@@ -935,6 +1071,70 @@ async function main() {
       return;
     }
 
+    // ── StudyOS: URL ──────────────────────────────────────────────────────────
+    if (pending.step === 'studyos_awaiting_url') {
+      const url = parseStudyosUrl(text);
+      if (!url) {
+        await ctx.reply(
+          '⚠️ Esa no parece una URL válida (debe empezar con <code>https://</code>).\n\n' +
+            '<i>Ejemplo: https://study.alpizar.dev</i>',
+          { parse_mode: 'HTML' },
+        );
+        return;
+      }
+
+      await advancePendingRegistration(chatId, 'studyos_awaiting_token', { studyos_url: url });
+      await ctx.reply(
+        `✅ URL guardada: <code>${url}</code>\n\n` +
+          `🔑 <b>Paso 2 de 2</b>\n` +
+          `Envíame el <b>token de sync</b> de esa instancia (env <code>STUDYOS_SYNC_TOKEN</code>).\n\n` +
+          `<i>🔒 Se guardará cifrado. Después de enviarlo, borra el mensaje por seguridad.</i>`,
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+
+    // ── StudyOS: token (se prueba la conexión antes de guardar) ───────────────
+    if (pending.step === 'studyos_awaiting_token') {
+      const token = text.trim();
+      if (token.length < 16 || /\s/.test(token)) {
+        await ctx.reply('⚠️ Ese token parece inválido (muy corto o con espacios). Inténtalo de nuevo.');
+        return;
+      }
+      if (!pending.studyos_url) {
+        await deletePendingRegistration(chatId);
+        await ctx.reply('❌ Se perdió la URL del paso anterior. Empieza de nuevo con /studyos.');
+        return;
+      }
+
+      await ctx.reply('⏳ Probando la conexión…');
+      const ping = await pingStudyosUrl(pending.studyos_url, token);
+      if (!ping.ok) {
+        await ctx.reply(
+          `🔴 No pude conectarme a <code>${pending.studyos_url}</code>:\n` +
+            `<code>${escapeHtml(ping.error ?? 'error desconocido')}</code>\n\n` +
+            `Revisa que la URL sea correcta y que el token coincida con el ` +
+            `<code>STUDYOS_SYNC_TOKEN</code> de esa instancia. Envía el token de nuevo, ` +
+            `o /cancelar para salir.`,
+          { parse_mode: 'HTML' },
+        );
+        return;
+      }
+
+      await updateUserStudyos(chatId, pending.studyos_url, encrypt(token));
+      await deletePendingRegistration(chatId);
+      await ctx.reply(
+        `🎉 <b>StudyOS conectado.</b>\n\n` +
+          `🌐 <code>${pending.studyos_url}</code>\n` +
+          `🟢 Conexión verificada.\n\n` +
+          `Tus notificaciones nuevas se sincronizarán a partir del próximo ciclo ` +
+          `(y las de los últimos 14 días que estén pendientes también). ` +
+          `Estado en cualquier momento: /studyos.`,
+        { parse_mode: 'HTML' },
+      );
+      return;
+    }
+
     // ── Step 4: Confirmation (fallback if typed) ──────────────────────────────
     if (pending.step === 'awaiting_confirmation') {
       await ctx.reply(
@@ -1069,9 +1269,6 @@ async function main() {
   // Errores operativos de las últimas 24 h, agrupados y en cristiano — sin
   // tener que abrir docker logs. Solo admin.
 
-  const escapeHtml = (s: string) =>
-    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
   const ACTION_LABELS: Record<string, string> = {
     drive_upload: 'Subida a Drive',
     storage_folder: 'Carpeta de Drive/OneDrive',
@@ -1083,6 +1280,7 @@ async function main() {
     telegram_doc_link: 'Envío de link de documento',
     dispatch_internal: 'Procesamiento de notificación',
     studyos_forward: 'Envío a StudyOS',
+    studyos_forward_permanent: 'Envío a StudyOS (descartado, error definitivo)',
     tec_auth_failed: 'Login TEC Digital',
     scrape_failed: 'Scrape de TEC Digital',
     drive_auth_alert: 'Aviso de renovación de Drive',
@@ -1140,6 +1338,7 @@ async function main() {
     { command: 'start', description: 'Registrar tu cuenta en el bot' },
     { command: 'actualizar', description: 'Actualizar correo, contraseña o carpeta de Drive' },
     { command: 'almacenamiento', description: 'Elegir Drive, OneDrive o ninguno' },
+    { command: 'studyos', description: 'Conectar o ver el estado de tu StudyOS' },
     { command: 'estado', description: 'Ver el estado de tu registro' },
     { command: 'filtros', description: 'Silenciar cursos o comunidades' },
     { command: 'cancelar', description: 'Cancelar el registro en progreso' },

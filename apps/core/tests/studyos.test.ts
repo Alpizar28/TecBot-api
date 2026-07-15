@@ -127,14 +127,37 @@ describe('forwardNotification()', () => {
     expect(db.recordStudyosFailure).not.toHaveBeenCalled();
   });
 
-  it('records failure without throwing when StudyOS is down', async () => {
+  it('records a transient failure (retryable) when StudyOS is down', async () => {
     db.getNotificationId.mockResolvedValue('row-1');
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNREFUSED')));
 
     const { forwardNotification } = await import('../src/studyos.js');
     await expect(forwardNotification(baseUser, notification)).resolves.toBeUndefined();
-    expect(db.recordStudyosFailure).toHaveBeenCalledWith('row-1', expect.stringContaining('ECONNREFUSED'));
+    expect(db.recordStudyosFailure).toHaveBeenCalledWith(
+      'row-1',
+      expect.stringContaining('ECONNREFUSED'),
+      { permanent: false },
+    );
     expect(db.markStudyosDelivered).not.toHaveBeenCalled();
+  });
+
+  it('marks a 422 rejection as permanent (never retried)', async () => {
+    db.getNotificationId.mockResolvedValue('row-1');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 422, text: async () => 'type inválido' }),
+    );
+
+    const { forwardNotification } = await import('../src/studyos.js');
+    await forwardNotification(baseUser, notification);
+    expect(db.recordStudyosFailure).toHaveBeenCalledWith(
+      'row-1',
+      expect.stringContaining('422'),
+      { permanent: true },
+    );
+    expect(db.insertErrorLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'studyos_forward_permanent' }),
+    );
   });
 
   it('is a no-op when the user has no StudyOS target', async () => {
@@ -171,5 +194,41 @@ describe('retryStudyosPending()', () => {
     expect(payload.external_id).toBe('notif_9');
     expect(payload.published_at).toBe('2026-07-13');
     expect(db.markStudyosDelivered).toHaveBeenCalledWith('row-9');
+  });
+});
+
+describe('delivery error classification', () => {
+  it('permanent for payload/route errors, transient for the rest', async () => {
+    const { StudyosHttpError, isPermanentDeliveryError } = await import('../src/studyos.js');
+    for (const status of [400, 404, 413, 422]) {
+      expect(isPermanentDeliveryError(new StudyosHttpError(status, 'x'))).toBe(true);
+    }
+    for (const status of [401, 403, 429, 500, 502, 503]) {
+      expect(isPermanentDeliveryError(new StudyosHttpError(status, 'x'))).toBe(false);
+    }
+    expect(isPermanentDeliveryError(new Error('ECONNREFUSED'))).toBe(false);
+  });
+});
+
+describe('pingStudyos()', () => {
+  const target = { url: 'https://study.alpizar.dev', token: 'tok' };
+
+  it('returns ok when /api/sync/ping answers 200', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+    const { pingStudyos } = await import('../src/studyos.js');
+    expect(await pingStudyos(target)).toEqual({ ok: true });
+    expect(fetchMock.mock.calls[0][0]).toBe('https://study.alpizar.dev/api/sync/ping');
+  });
+
+  it('surfaces the HTTP status on auth failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 401, text: async () => 'token inválido' }),
+    );
+    const { pingStudyos } = await import('../src/studyos.js');
+    const res = await pingStudyos(target);
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('401');
   });
 });
