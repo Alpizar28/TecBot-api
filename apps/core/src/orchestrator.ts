@@ -6,6 +6,7 @@ import {
   getOneDriveOAuthToken,
   saveDriveOAuthToken,
   saveOneDriveOAuthToken,
+  saveCycleStats,
   encrypt,
   decrypt,
 } from '@tec-brain/database';
@@ -101,6 +102,7 @@ export async function runOrchestrationCycle(): Promise<void> {
   running = true;
   dispatchCounters.clear();
   recentDispatchErrors.length = 0;
+  const cycleStartedAt = new Date();
   logger.info({ component: 'orchestrator' }, 'Starting orchestration cycle');
 
   try {
@@ -190,6 +192,28 @@ export async function runOrchestrationCycle(): Promise<void> {
       'Endpoint metrics',
     );
     await evaluateAlerts(cycleStats);
+
+    // Persist the cycle summary so the bot can answer /status from the DB.
+    await saveCycleStats({
+      started_at: cycleStartedAt,
+      finished_at: new Date(),
+      users_total: cycleStats.usersTotal,
+      users_processed: cycleStats.usersProcessed,
+      users_failed: cycleStats.usersFailed,
+      users_auth_failed: cycleStats.usersAuthFailed,
+      notifications_dispatched: cycleStats.notificationsDispatched,
+      notifications_processed: cycleStats.notificationsProcessed,
+      notifications_partial: cycleStats.notificationsPartial,
+      dominant_error: dominantDispatchError(recentDispatchErrors),
+    }).catch((err) =>
+      logger.warn(
+        {
+          component: 'orchestrator',
+          errorMessage: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to persist cycle stats',
+      ),
+    );
   } finally {
     running = false;
     logger.info({ component: 'orchestrator' }, 'Cycle complete');

@@ -841,4 +841,52 @@ export async function getPendingStudyosNotifications(
   return res.rows;
 }
 
+// ─── Cycle Stats (último ciclo del orquestador, para /status) ────────────────
+
+export interface CycleStatsRecord {
+  started_at: Date;
+  finished_at: Date;
+  users_total: number;
+  users_processed: number;
+  users_failed: number;
+  users_auth_failed: number;
+  notifications_dispatched: number;
+  notifications_processed: number;
+  notifications_partial: number;
+  dominant_error: string | null;
+}
+
+export async function saveCycleStats(stats: CycleStatsRecord): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO cycle_stats (
+       id, started_at, finished_at, users_total, users_processed, users_failed,
+       users_auth_failed, notifications_dispatched, notifications_processed,
+       notifications_partial, dominant_error
+     ) VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ON CONFLICT (id) DO UPDATE SET
+       started_at = $1, finished_at = $2, users_total = $3, users_processed = $4,
+       users_failed = $5, users_auth_failed = $6, notifications_dispatched = $7,
+       notifications_processed = $8, notifications_partial = $9, dominant_error = $10`,
+    [
+      stats.started_at,
+      stats.finished_at,
+      stats.users_total,
+      stats.users_processed,
+      stats.users_failed,
+      stats.users_auth_failed,
+      stats.notifications_dispatched,
+      stats.notifications_processed,
+      stats.notifications_partial,
+      stats.dominant_error,
+    ],
+  );
+}
+
+export async function getLastCycleStats(): Promise<CycleStatsRecord | null> {
+  const pool = getPool();
+  const res = await pool.query<CycleStatsRecord>('SELECT * FROM cycle_stats WHERE id = 1');
+  return res.rows[0] ?? null;
+}
+
 export type { pg };

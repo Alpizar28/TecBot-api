@@ -48,6 +48,9 @@ export {
   recordStudyosFailure,
   getPendingStudyosNotifications,
   type StudyosPendingNotification,
+  saveCycleStats,
+  getLastCycleStats,
+  type CycleStatsRecord,
 } from './queries.js';
 export { runMigrations } from './migrate.js';
 export { encrypt, decrypt, reEncryptLegacyCbcRows } from './crypto.js';

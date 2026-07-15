@@ -25,6 +25,7 @@ import {
   unmuteUserCourses,
   resolveCourseEntry,
   getAdminStats,
+  getLastCycleStats,
   type RegistrationStep,
 } from '@tec-brain/database';
 import {
@@ -977,6 +978,87 @@ async function main() {
     }
   });
 
+  // ─── /status ────────────────────────────────────────────────────────────────
+  // Salud operativa del último ciclo del orquestador (persistido por el core
+  // en cycle_stats). Solo admin: expone métricas globales del sistema.
+
+  /** Cadencia esperada del cron del core; pasado este margen, algo anda mal. */
+  const CYCLE_STALE_AFTER_MS = 45 * 60_000;
+
+  function formatAge(ms: number): string {
+    const mins = Math.floor(ms / 60_000);
+    if (mins < 1) return 'hace menos de 1 min';
+    if (mins < 60) return `hace ${mins} min`;
+    const hours = Math.floor(mins / 60);
+    return `hace ${hours} h ${mins % 60} min`;
+  }
+
+  bot.command('status', async (ctx) => {
+    const chatId = String(ctx.chat.id);
+    if (!ADMIN_CHAT_ID || chatId !== ADMIN_CHAT_ID) return;
+
+    try {
+      const stats = await getLastCycleStats();
+      if (!stats) {
+        await ctx.reply('ℹ️ Aún no hay ciclos registrados (el core no ha corrido desde el deploy).');
+        return;
+      }
+
+      const finishedAt = new Date(stats.finished_at);
+      const ageMs = Date.now() - finishedAt.getTime();
+      const durationSecs = Math.max(
+        0,
+        Math.round((finishedAt.getTime() - new Date(stats.started_at).getTime()) / 1000),
+      );
+      const timeCR = finishedAt.toLocaleTimeString('es-CR', {
+        timeZone: 'America/Costa_Rica',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      const usersOk = stats.users_processed;
+      const notifsOk = stats.notifications_processed;
+      const healthy =
+        stats.users_failed === 0 &&
+        stats.users_auth_failed === 0 &&
+        stats.notifications_partial === 0;
+
+      const lines = [
+        `📡 <b>Status del sistema</b>`,
+        ``,
+        `🕐 <b>Último ciclo:</b> ${timeCR} (${formatAge(ageMs)}, duró ${durationSecs}s)`,
+        `👥 <b>Usuarios:</b> ${usersOk}/${stats.users_total} OK` +
+          (stats.users_auth_failed > 0
+            ? ` — ${stats.users_auth_failed} con credenciales TEC vencidas`
+            : '') +
+          (stats.users_failed > 0 ? ` — ${stats.users_failed} con error de scrape` : ''),
+        `🔔 <b>Notificaciones:</b> ${notifsOk} procesadas` +
+          (stats.notifications_partial > 0
+            ? `, ${stats.notifications_partial} fallidas (reintentan cada ciclo)`
+            : stats.notifications_dispatched === 0
+              ? ' (nada nuevo)'
+              : ''),
+      ];
+
+      if (stats.dominant_error) {
+        lines.push(`⚠️ <b>Error dominante:</b> <code>${stats.dominant_error}</code>`);
+      }
+      if (ageMs > CYCLE_STALE_AFTER_MS) {
+        lines.push(
+          ``,
+          `⏰ <b>Ojo:</b> el ciclo corre cada 30 min y el último fue ${formatAge(ageMs)} — el orquestador podría estar caído.`,
+        );
+      } else if (healthy) {
+        lines.push(``, `✅ Todo en orden`);
+      }
+
+      await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' });
+    } catch (err) {
+      await ctx.reply('❌ Error al consultar el estado del sistema.');
+      logger.error({ err }, '/status error');
+    }
+  });
+
   // ─── Error handler ──────────────────────────────────────────────────────────
 
   bot.catch((err) => {
@@ -1002,6 +1084,7 @@ async function main() {
     { command: 'filtros', description: 'Silenciar cursos o comunidades' },
     { command: 'cancelar', description: 'Cancelar el registro en progreso' },
     { command: 'admin', description: 'Panel de administración' },
+    { command: 'status', description: 'Salud del último ciclo de scraping (admin)' },
   ]);
 
   logger.info('Starting bot (long polling)');
