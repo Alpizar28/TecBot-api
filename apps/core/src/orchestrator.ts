@@ -19,7 +19,7 @@ import {
   type OneDriveOAuthClient,
 } from '@tec-brain/drive';
 import { dispatch, type DispatchResult } from './dispatcher.js';
-import { retryStudyosPending } from './studyos.js';
+import { retryStudyosPending, syncEvaluations, type FileDownloader } from './studyos.js';
 import pLimit from 'p-limit';
 import type { ScrapeResponse } from '@tec-brain/types';
 import { logger } from './logger.js';
@@ -302,6 +302,47 @@ async function processUser(
   );
 
   const scraperSecret = process.env.SCRAPER_SECRET;
+
+  // Evaluations rubric sweep (throttled inside; no-op without StudyOS config).
+  await syncEvaluations(
+    user,
+    async (username, tecPassword) => {
+      const res = await axios.post<{ status: string; courses: never[]; error?: string }>(
+        `${SCRAPER_URL}/scrape-evaluations`,
+        { username, password: tecPassword },
+        { timeout: 300_000, headers: scraperSecret ? { 'x-scraper-secret': scraperSecret } : {} },
+      );
+      if (res.data.status !== 'success') {
+        throw new Error(res.data.error || 'scrape-evaluations failed');
+      }
+      return res.data.courses;
+    },
+    { username: user.tec_username, password },
+    (async (downloadUrl: string) => {
+      const res = await axios.post<ArrayBuffer>(
+        `${SCRAPER_URL}/download-file`,
+        { username: user.tec_username, password, downloadUrl },
+        {
+          responseType: 'arraybuffer',
+          timeout: 60_000,
+          headers: scraperSecret ? { 'x-scraper-secret': scraperSecret } : {},
+        },
+      );
+      const contentType =
+        (res.headers['content-type'] as string | undefined) ?? 'application/octet-stream';
+      return { data: res.data, contentType };
+    }) satisfies FileDownloader,
+  ).catch((err) =>
+    logger.warn(
+      {
+        component: 'orchestrator',
+        userId: user.id,
+        errorMessage: err instanceof Error ? err.message : String(err),
+      },
+      'Evaluations sweep failed',
+    ),
+  );
+
   const response = await requestWithRetry(
     () =>
       axios.post<ScrapeResponse>(

@@ -4,6 +4,7 @@ import sensible from '@fastify/sensible';
 import helmet from '@fastify/helmet';
 import { SessionManager } from './sessions/session-manager.js';
 import { processNotificationsSequentially } from './extractors/notifications.js';
+import { scrapeEvaluations } from './extractors/evaluations.js';
 import type { ScrapeResponse } from '@tec-brain/types';
 
 const SESSION_DIR = process.env.SESSION_DIR ?? './data/sessions';
@@ -143,6 +144,54 @@ export function buildServer(): FastifyInstance {
           cookies: [],
           error,
         } satisfies ScrapeResponse);
+      }
+    },
+  );
+
+  // ── Evaluations Scrape Endpoint ───────────────────────────────────────────
+  // Scrapes every current-term course's "Evaluaciones" rubric (grades, due
+  // dates, statement files). Stateless: the caller (core) decides what to
+  // forward; StudyOS dedupes by external_id.
+  fastify.post<{
+    Body: { username: string; password: string };
+  }>(
+    '/scrape-evaluations',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          properties: {
+            username: { type: 'string' },
+            password: { type: 'string' },
+          },
+          required: ['username', 'password'],
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!scraperSecretMatches(request.headers['x-scraper-secret'])) {
+        return reply.status(401).send({ status: 'error', error: 'Unauthorized' });
+      }
+      const { username, password } = request.body;
+
+      try {
+        const client = await sessionManager.getClient(username, password);
+        let courses = await scrapeEvaluations(client);
+
+        // Empty course list usually means the portal bounced us to the login
+        // page (stale session) — re-authenticate once and retry.
+        if (courses.length === 0) {
+          request.log.warn({ username }, 'No courses found, re-authenticating');
+          client.jar.removeAllCookiesSync();
+          await sessionManager.login(client, username, password);
+          courses = await scrapeEvaluations(client);
+        }
+
+        return reply.send({ status: 'success', courses });
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        request.log.error({ err, username }, 'Evaluations scrape failed');
+        return reply.status(500).send({ status: 'error', error, courses: [] });
       }
     },
   );

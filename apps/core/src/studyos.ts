@@ -25,6 +25,19 @@ export interface StudyosTarget {
   token: string;
 }
 
+export interface StudyosEvaluationMeta {
+  category: string;
+  category_weight: number | null;
+  weight: number | null;
+  score: number | null;
+  max_score: number | null;
+  weighted_score: number | null;
+  grade_over_100: number | null;
+  due_date: string;
+  due_time: string;
+  late_allowed: boolean;
+}
+
 export interface StudyosItemPayload {
   schema_version: 1;
   external_id: string;
@@ -36,6 +49,8 @@ export interface StudyosItemPayload {
   published_at: string;
   detected_at: string;
   files: Array<{ file_name: string; download_url: string; mime_type: string }>;
+  /** Structured rubric data — only present on items scraped from Evaluaciones */
+  evaluation?: StudyosEvaluationMeta;
 }
 
 export function getStudyosTarget(user: User): StudyosTarget | null {
@@ -209,6 +224,179 @@ export async function forwardNotification(
     await recordStudyosFailure(notificationId, message).catch(() => {});
     log.warn({ errorMessage: message }, 'StudyOS forward failed; will retry next cycle');
   }
+}
+
+// ─── Evaluations sync (rubric scrape → StudyOS) ──────────────────────────────
+
+interface ScrapedEvaluationCourse {
+  code: string;
+  community_key: string;
+  name: string;
+  url: string;
+  evaluations: Array<{
+    external_id: string;
+    category: string;
+    category_weight: number | null;
+    title: string;
+    score: number | null;
+    max_score: number | null;
+    weighted_score: number | null;
+    grade_over_100: number | null;
+    description: string;
+    due_date: string;
+    due_time: string;
+    late_allowed: boolean;
+    comments: string;
+    files: Array<{ file_name: string; download_url: string; mime_type: string }>;
+  }>;
+}
+
+const EVAL_SYNC_INTERVAL_MS =
+  parseInt(process.env.STUDYOS_EVAL_SYNC_MINUTES ?? '30', 10) * 60_000;
+
+// Per-user timestamp of the last evaluations sweep. In-memory on purpose:
+// the sweep is stateless (StudyOS dedupes by external_id and detects content
+// changes), so losing this on restart only costs one extra sweep.
+const lastEvalSync = new Map<string, number>();
+
+export function buildEvaluationItemPayload(
+  course: ScrapedEvaluationCourse,
+  ev: ScrapedEvaluationCourse['evaluations'][number],
+  detectedAt = new Date().toISOString(),
+): StudyosItemPayload {
+  const gradeLine =
+    ev.grade_over_100 !== null
+      ? `Nota: ${ev.grade_over_100}/100`
+      : ev.score !== null && ev.max_score !== null
+        ? `Nota: ${ev.score}/${ev.max_score} pts`
+        : ev.weighted_score !== null
+          ? `Nota ponderada: ${ev.weighted_score}`
+          : '';
+  const lines = [
+    ev.description,
+    ev.due_date ? `Fecha de entrega: ${ev.due_date}${ev.due_time ? ` ${ev.due_time}` : ''}` : '',
+    gradeLine,
+    ev.comments ? `Comentarios: ${ev.comments}` : '',
+    ev.max_score !== null ? `Valor: ${ev.max_score} pts de ${ev.category} (${ev.category_weight ?? '?'}%)` : `Categoría: ${ev.category}`,
+  ].filter(Boolean);
+
+  return {
+    schema_version: 1,
+    external_id: ev.external_id,
+    type: 'evaluacion',
+    course: { key: `code:${course.code}`, code: course.code, name: course.name },
+    title: ev.title,
+    body: lines.join('\n'),
+    link: `${course.url}evaluation/tda-ce-estudiante/tda-index`,
+    published_at: '',
+    detected_at: detectedAt,
+    files: ev.files,
+    evaluation: {
+      category: ev.category,
+      category_weight: ev.category_weight,
+      weight: ev.max_score,
+      score: ev.score,
+      max_score: ev.max_score,
+      weighted_score: ev.weighted_score,
+      grade_over_100: ev.grade_over_100,
+      due_date: ev.due_date,
+      due_time: ev.due_time,
+      late_allowed: ev.late_allowed,
+    },
+  };
+}
+
+export interface EvaluationScraper {
+  (username: string, password: string): Promise<ScrapedEvaluationCourse[]>;
+}
+
+/**
+ * Scrapes the per-course Evaluaciones rubric and forwards every assignment
+ * to the user's StudyOS. Throttled per user (STUDYOS_EVAL_SYNC_MINUTES,
+ * default 30) because the rubric changes far less often than the cron cycle.
+ * Stateless: every sweep re-posts everything; StudyOS answers duplicate for
+ * unchanged items and updated when a grade/due date appears. Never throws.
+ */
+export async function syncEvaluations(
+  user: User,
+  scrape: EvaluationScraper,
+  credentials: { username: string; password: string },
+  downloader?: FileDownloader,
+): Promise<void> {
+  const target = getStudyosTarget(user);
+  if (!target) return;
+
+  const last = lastEvalSync.get(user.id) ?? 0;
+  if (Date.now() - last < EVAL_SYNC_INTERVAL_MS) return;
+  lastEvalSync.set(user.id, Date.now());
+
+  const log = logger.child({ component: 'studyos_evaluations', userId: user.id });
+
+  try {
+    const courses = await scrape(credentials.username, credentials.password);
+    let sent = 0;
+    let failed = 0;
+
+    for (const course of courses) {
+      for (const ev of course.evaluations) {
+        const payload = buildEvaluationItemPayload(course, ev);
+        try {
+          await postItem(target, payload);
+          sent += 1;
+
+          if (downloader && ev.files.length > 0) {
+            for (const file of ev.files) {
+              try {
+                const { data, contentType } = await downloader(file.download_url);
+                await postFile(
+                  target,
+                  ev.external_id,
+                  {
+                    file_name: file.file_name,
+                    mime_type: file.mime_type || contentType,
+                    source_url: file.download_url,
+                  },
+                  data,
+                );
+              } catch (err) {
+                // Best-effort: the item was delivered; the next sweep retries.
+                log.warn(
+                  {
+                    fileName: file.file_name,
+                    errorMessage: err instanceof Error ? err.message : String(err),
+                  },
+                  'Evaluation file forward failed',
+                );
+              }
+            }
+          }
+        } catch (err) {
+          failed += 1;
+          log.warn(
+            {
+              externalId: ev.external_id,
+              errorMessage: err instanceof Error ? err.message : String(err),
+            },
+            'Evaluation item forward failed',
+          );
+        }
+      }
+    }
+
+    log.info({ courses: courses.length, sent, failed }, 'Evaluations sweep finished');
+  } catch (err) {
+    // Full-sweep failure: clear the throttle so the next cycle retries.
+    lastEvalSync.set(user.id, 0);
+    log.warn(
+      { errorMessage: err instanceof Error ? err.message : String(err) },
+      'Evaluations sweep failed',
+    );
+  }
+}
+
+/** Test hook: resets the per-user evaluations throttle. */
+export function resetEvaluationSyncThrottle(): void {
+  lastEvalSync.clear();
 }
 
 /**
