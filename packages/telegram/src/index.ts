@@ -5,6 +5,18 @@ const SEPARATOR = '───────────────';
 
 // ─── Message Formatters ───────────────────────────────────────────────────────
 
+/** Deep link to the item in the user's StudyOS instance (empty if not configured). */
+function studyosLine(user: User, n: RawNotification): string {
+  if (!user.studyos_url) return '';
+  const base = user.studyos_url.replace(/\/+$/, '');
+  return `🎓 <a href="${escapeHtml(`${base}/hoy?item=${encodeURIComponent(n.external_id)}`)}">Ver en StudyOS</a>`;
+}
+
+function withStudyosLine(message: string, user: User, n: RawNotification): string {
+  const line = studyosLine(user, n);
+  return line ? `${message}\n${line}` : message;
+}
+
 function formatNotice(_user: User, n: RawNotification): string {
   const parts: string[] = [`📰 <b>${escapeHtml(n.course)}</b>`, SEPARATOR];
 
@@ -162,15 +174,21 @@ export class TelegramService {
   }
 
   async sendNotice(user: User, n: RawNotification): Promise<void> {
-    await this.sendMessage(user.telegram_chat_id, formatNotice(user, n));
+    await this.sendMessage(user.telegram_chat_id, withStudyosLine(formatNotice(user, n), user, n));
   }
 
   async sendEvaluation(user: User, n: RawNotification): Promise<void> {
-    await this.sendMessage(user.telegram_chat_id, formatEvaluation(user, n));
+    await this.sendMessage(
+      user.telegram_chat_id,
+      withStudyosLine(formatEvaluation(user, n), user, n),
+    );
   }
 
   async sendDocumentLink(user: User, n: RawNotification): Promise<void> {
-    await this.sendMessage(user.telegram_chat_id, formatDocumentLink(user, n));
+    await this.sendMessage(
+      user.telegram_chat_id,
+      withStudyosLine(formatDocumentLink(user, n), user, n),
+    );
   }
 
   async sendDocumentsSaved(
@@ -180,7 +198,7 @@ export class TelegramService {
   ): Promise<void> {
     await this.sendMessage(
       user.telegram_chat_id,
-      formatDocumentsSaved(user, n, files),
+      withStudyosLine(formatDocumentsSaved(user, n, files), user, n),
     );
   }
 
@@ -191,7 +209,7 @@ export class TelegramService {
   ): Promise<void> {
     await this.sendMessage(
       user.telegram_chat_id,
-      formatDocumentsDownload(user, n, files),
+      withStudyosLine(formatDocumentsDownload(user, n, files), user, n),
     );
   }
 

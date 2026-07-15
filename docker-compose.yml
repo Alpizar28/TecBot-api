@@ -40,6 +40,9 @@ services:
     environment:
       PORT: '3001'
       SCRAPER_SECRET: '${SCRAPER_SECRET}'
+      # Must match the volume mount below — without it the scraper writes to a
+      # relative ./data/sessions and hits EACCES (see NEXT_STEPS.md).
+      SESSION_DIR: /app/data/sessions
     volumes:
       - sessions_data:/app/data/sessions
     healthcheck:

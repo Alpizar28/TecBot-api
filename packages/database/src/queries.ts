@@ -105,8 +105,8 @@ export async function insertNotification(
 
   await pool.query(
     `INSERT INTO notifications
-       (user_id, external_id, type, course, title, description, link, hash, document_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       (user_id, external_id, type, course, title, description, link, hash, document_status, published_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      ON CONFLICT (user_id, external_id) DO NOTHING`,
     [
       userId,
@@ -118,6 +118,7 @@ export async function insertNotification(
       notification.link,
       hash,
       notification.document_status || null,
+      notification.date || null,
     ],
   );
 }
@@ -760,6 +761,84 @@ export async function getAdminStats(): Promise<AdminStats> {
     totalNotifications: parseInt(notifRes.rows[0]?.count ?? '0', 10),
     totalUploadedFiles: parseInt(filesRes.rows[0]?.count ?? '0', 10),
   };
+}
+
+// ─── StudyOS Dispatch (delivery tracking + retry) ────────────────────────────
+
+export interface StudyosPendingNotification {
+  id: string;
+  external_id: string;
+  type: string;
+  course: string;
+  title: string;
+  description: string | null;
+  link: string | null;
+  published_at: string | null;
+}
+
+export async function getNotificationId(
+  userId: string,
+  externalId: string,
+): Promise<string | null> {
+  const pool = getPool();
+  const res = await pool.query<{ id: string }>(
+    'SELECT id FROM notifications WHERE user_id = $1 AND external_id = $2 LIMIT 1',
+    [userId, externalId],
+  );
+  return res.rows[0]?.id ?? null;
+}
+
+export async function markStudyosDelivered(notificationId: string): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO studyos_dispatch (notification_id, delivered_at, attempts, last_error)
+     VALUES ($1, now(), 1, NULL)
+     ON CONFLICT (notification_id) DO UPDATE
+       SET delivered_at = now(),
+           attempts = studyos_dispatch.attempts + 1,
+           last_error = NULL`,
+    [notificationId],
+  );
+}
+
+export async function recordStudyosFailure(
+  notificationId: string,
+  error: string,
+): Promise<void> {
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO studyos_dispatch (notification_id, delivered_at, attempts, last_error)
+     VALUES ($1, NULL, 1, $2)
+     ON CONFLICT (notification_id) DO UPDATE
+       SET attempts = studyos_dispatch.attempts + 1,
+           last_error = $2`,
+    [notificationId, error.slice(0, 500)],
+  );
+}
+
+/**
+ * Notifications not yet delivered to StudyOS (no dispatch row, or failed with
+ * attempts under the cap). Limited to the last 14 days so enabling the
+ * integration doesn't flood StudyOS with the full history.
+ */
+export async function getPendingStudyosNotifications(
+  userId: string,
+  maxAttempts = 10,
+  limit = 25,
+): Promise<StudyosPendingNotification[]> {
+  const pool = getPool();
+  const res = await pool.query<StudyosPendingNotification>(
+    `SELECT n.id, n.external_id, n.type, n.course, n.title, n.description, n.link, n.published_at
+       FROM notifications n
+       LEFT JOIN studyos_dispatch d ON d.notification_id = n.id
+      WHERE n.user_id = $1
+        AND n.sent_at > now() - interval '14 days'
+        AND (d.notification_id IS NULL OR (d.delivered_at IS NULL AND d.attempts < $2))
+      ORDER BY n.sent_at
+      LIMIT $3`,
+    [userId, maxAttempts, limit],
+  );
+  return res.rows;
 }
 
 export type { pg };

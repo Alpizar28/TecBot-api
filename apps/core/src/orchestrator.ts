@@ -19,6 +19,7 @@ import {
   type OneDriveOAuthClient,
 } from '@tec-brain/drive';
 import { dispatch, type DispatchResult } from './dispatcher.js';
+import { retryStudyosPending } from './studyos.js';
 import pLimit from 'p-limit';
 import type { ScrapeResponse } from '@tec-brain/types';
 import { logger } from './logger.js';
@@ -286,6 +287,19 @@ async function processUser(
   );
 
   const password = decrypt(user.tec_password_enc);
+
+  // Retry StudyOS deliveries that failed in previous cycles (no-op if the
+  // user has no StudyOS configured). Never blocks the scrape.
+  await retryStudyosPending(user).catch((err) =>
+    logger.warn(
+      {
+        component: 'orchestrator',
+        userId: user.id,
+        errorMessage: err instanceof Error ? err.message : String(err),
+      },
+      'StudyOS retry sweep failed',
+    ),
+  );
 
   const scraperSecret = process.env.SCRAPER_SECRET;
   const response = await requestWithRetry(

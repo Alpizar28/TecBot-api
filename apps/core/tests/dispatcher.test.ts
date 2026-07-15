@@ -25,6 +25,8 @@ describe('dispatch()', () => {
     drive_root_folder_id: null,
     onedrive_root_folder_id: null,
     storage_provider: 'none',
+    studyos_url: null,
+    studyos_token_enc: null,
     is_active: true,
     created_at: new Date(),
   };

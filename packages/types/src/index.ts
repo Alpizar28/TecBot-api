@@ -13,6 +13,10 @@ export interface User {
   drive_root_folder_id: string | null;
   onedrive_root_folder_id: string | null;
   storage_provider: 'drive' | 'onedrive' | 'none';
+  /** Base URL of the user's StudyOS instance (null = StudyOS forwarding disabled) */
+  studyos_url: string | null;
+  /** Encrypted bearer token for StudyOS /api/sync/* (same crypto as tec_password_enc) */
+  studyos_token_enc: string | null;
   is_active: boolean;
   created_at: Date;
 }

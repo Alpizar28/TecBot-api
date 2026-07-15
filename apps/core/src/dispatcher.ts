@@ -15,6 +15,7 @@ import { TelegramService } from '@tec-brain/telegram';
 import { DriveService, OneDriveService } from '@tec-brain/drive';
 import type { User, RawNotification } from '@tec-brain/types';
 import { logger } from './logger.js';
+import { forwardNotification, type FileDownloader } from './studyos.js';
 
 interface LoggerLike {
   info: (...args: unknown[]) => void;
@@ -94,6 +95,8 @@ export async function dispatch(
     );
     if (!exists) {
       await insertNotification(user.id, notification);
+      // Muting silences Telegram only — StudyOS is the system of record.
+      await forwardNotification(user, notification);
     }
     return { processed: true, reason: 'muted' };
   }
@@ -175,6 +178,24 @@ export async function dispatch(
     } else if (shouldRetryDocument && notification.document_status === 'resolved') {
       log.info('Updating existing document notification status to resolved');
       await updateNotificationDocumentStatus(user.id, notification.external_id, 'resolved');
+    }
+    if (!exists || shouldRetryDocument) {
+      const downloader: FileDownloader = async (downloadUrl) => {
+        const scraperSecret = process.env.SCRAPER_SECRET;
+        const res = await axios.post<ArrayBuffer>(
+          `${scraperUrl}/download-file`,
+          { username: user.tec_username, password: tecPassword, downloadUrl },
+          {
+            responseType: 'arraybuffer',
+            timeout: 60_000,
+            headers: scraperSecret ? { 'x-scraper-secret': scraperSecret } : {},
+          },
+        );
+        const contentType =
+          (res.headers['content-type'] as string | undefined) ?? 'application/octet-stream';
+        return { data: res.data, contentType };
+      };
+      await forwardNotification(user, notification, downloader);
     }
   } else {
     log.warn(

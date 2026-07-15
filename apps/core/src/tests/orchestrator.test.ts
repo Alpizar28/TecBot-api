@@ -83,6 +83,8 @@ describe('Telegram message formatters', () => {
     drive_root_folder_id: 'folder-id',
     onedrive_root_folder_id: null,
     storage_provider: 'drive' as const,
+    studyos_url: null,
+    studyos_token_enc: null,
     is_active: true,
     created_at: new Date(),
   };
