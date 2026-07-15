@@ -5,8 +5,9 @@
  * assignments, weights, grades, due dates and the statement PDF links.
  *
  * Course discovery: the /dotlrn/ portal lists every enrolled course (all
- * terms); we keep only the most recent term (max year in the community key,
- * e.g. "S-1-2026.CA.EL2114.2").
+ * terms); we keep only the most recent term — max (year, term number) from
+ * the community key, e.g. "S-1-2026.CA.EL2114.2" — so when S-2 courses
+ * appear the S-1 ones of the same year drop out of the sweep.
  */
 import crypto from 'crypto';
 import * as cheerio from 'cheerio';
@@ -28,6 +29,8 @@ export interface CourseRef {
   url: string;
   /** Term year parsed from the community key (used for current-term filter) */
   year: number;
+  /** Term number within the year (S-1 vs S-2), tiebreaker of the filter */
+  term: number;
 }
 
 export interface EvaluationFile {
@@ -96,14 +99,16 @@ export function parseCourseLinks(html: string): CourseRef[] {
         name: name || code.toUpperCase(),
         url: `${TEC_BASE}${href.endsWith('/') ? href : `${href}/`}`,
         year: parseInt(term[3], 10),
+        term: parseInt(term[2], 10),
       });
     }
   });
 
   const all = [...byKey.values()];
   if (all.length === 0) return [];
-  const maxYear = Math.max(...all.map((c) => c.year));
-  return all.filter((c) => c.year === maxYear);
+  const rank = (c: CourseRef) => c.year * 10 + c.term;
+  const maxRank = Math.max(...all.map(rank));
+  return all.filter((c) => rank(c) === maxRank);
 }
 
 function parseScorePair(text: string): { score: number | null; max: number | null } {

@@ -100,6 +100,27 @@ describe('buildEvaluationItemPayload()', () => {
   });
 });
 
+describe('currentEvalSlot()', () => {
+  // Default schedule 7,12,17 in America/Costa_Rica (UTC-6).
+  it('maps a time after a slot hour to that slot of the same day', async () => {
+    const { currentEvalSlot } = await studyos();
+    // 13:30 UTC = 07:30 CR
+    expect(currentEvalSlot(new Date('2026-07-15T13:30:00Z'))).toBe('2026-07-15@7');
+    // 18:05 UTC = 12:05 CR
+    expect(currentEvalSlot(new Date('2026-07-15T18:05:00Z'))).toBe('2026-07-15@12');
+    // 23:59 UTC = 17:59 CR
+    expect(currentEvalSlot(new Date('2026-07-15T23:59:00Z'))).toBe('2026-07-15@17');
+  });
+
+  it("maps times before the first slot to yesterday's last slot", async () => {
+    const { currentEvalSlot } = await studyos();
+    // 10:00 UTC = 04:00 CR — before 07:00, belongs to yesterday@17
+    expect(currentEvalSlot(new Date('2026-07-15T10:00:00Z'))).toBe('2026-07-14@17');
+    // 05:00 UTC Jul 15 = 23:00 CR Jul 14 — after 17:00 of Jul 14
+    expect(currentEvalSlot(new Date('2026-07-15T05:00:00Z'))).toBe('2026-07-14@17');
+  });
+});
+
 describe('syncEvaluations()', () => {
   it('posts every evaluation item and its statement files', async () => {
     const fetchMock = stubFetch();
@@ -121,7 +142,7 @@ describe('syncEvaluations()', () => {
     expect(downloader).toHaveBeenCalledWith(course.evaluations[0].files[0].download_url);
   });
 
-  it('is throttled per user within the sync interval', async () => {
+  it('runs once per schedule slot per user', async () => {
     stubFetch();
     const scrape = vi.fn().mockResolvedValue([course]);
 
@@ -132,7 +153,7 @@ describe('syncEvaluations()', () => {
     expect(scrape).toHaveBeenCalledTimes(1);
   });
 
-  it('clears the throttle when the whole sweep fails so the next cycle retries', async () => {
+  it('clears the slot when the whole sweep fails so the next cycle retries', async () => {
     stubFetch();
     const scrape = vi.fn().mockRejectedValue(new Error('scraper down'));
 

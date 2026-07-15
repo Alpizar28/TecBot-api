@@ -46,6 +46,17 @@ describe('parseCourseLinks', () => {
     expect(ma?.name).toBe('Cálculo superior GR 1');
     expect(ma?.url).toBe(COURSE_URL);
   });
+
+  it('keeps only the latest term of the same year (S-2 beats S-1)', () => {
+    const html = `
+      <a href="/dotlrn/classes/MA/MA2104/S-1-2026.CA.MA2104.1/">Cálculo superior GR 1</a>
+      <a href="/dotlrn/classes/E/EL2207/S-2-2026.CA.EL2207.1/">Circuitos en CA GR 1</a>
+      <a href="/dotlrn/classes/CE/CE2201/S-2-2026.CA.CE2201.2/">Estructuras GR 2</a>`;
+    expect(parseCourseLinks(html).map((c) => c.community_key).sort()).toEqual([
+      'S-2-2026.CA.CE2201.2',
+      'S-2-2026.CA.EL2207.1',
+    ]);
+  });
 });
 
 describe('parseEvaluationsPage', () => {

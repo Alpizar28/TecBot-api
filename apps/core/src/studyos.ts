@@ -251,13 +251,54 @@ interface ScrapedEvaluationCourse {
   }>;
 }
 
-const EVAL_SYNC_INTERVAL_MS =
-  parseInt(process.env.STUDYOS_EVAL_SYNC_MINUTES ?? '30', 10) * 60_000;
+// Sweep schedule: once after each configured hour (default 07/12/17 in
+// America/Costa_Rica) instead of a fixed interval — the rubric changes a few
+// times a week at most, three sweeps a day is plenty.
+const EVAL_SYNC_HOURS = (() => {
+  const hours = [
+    ...new Set(
+      (process.env.STUDYOS_EVAL_SYNC_HOURS ?? '7,12,17')
+        .split(',')
+        .map((h) => parseInt(h.trim(), 10))
+        .filter((h) => Number.isInteger(h) && h >= 0 && h <= 23),
+    ),
+  ].sort((a, b) => a - b);
+  return hours.length > 0 ? hours : [7, 12, 17];
+})();
+const EVAL_SYNC_TZ = process.env.STUDYOS_EVAL_SYNC_TZ ?? 'America/Costa_Rica';
 
-// Per-user timestamp of the last evaluations sweep. In-memory on purpose:
+/**
+ * "YYYY-MM-DD@HH" of the most recent schedule slot at `now` (in EVAL_SYNC_TZ).
+ * Before the first slot of the day it returns yesterday's last slot, so a
+ * fresh process always has one slot "due". Exported for tests.
+ */
+export function currentEvalSlot(now: Date = new Date()): string {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: EVAL_SYNC_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hour12: false,
+  });
+  const read = (d: Date) => {
+    const parts = Object.fromEntries(fmt.formatToParts(d).map((p) => [p.type, p.value]));
+    return {
+      date: `${parts.year}-${parts.month}-${parts.day}`,
+      hour: parseInt(parts.hour, 10) % 24, // some ICU builds emit "24" at midnight
+    };
+  };
+  const today = read(now);
+  const slot = [...EVAL_SYNC_HOURS].reverse().find((h) => h <= today.hour);
+  if (slot !== undefined) return `${today.date}@${slot}`;
+  const yesterday = read(new Date(now.getTime() - 86_400_000));
+  return `${yesterday.date}@${EVAL_SYNC_HOURS[EVAL_SYNC_HOURS.length - 1]}`;
+}
+
+// Per-user slot key of the last evaluations sweep. In-memory on purpose:
 // the sweep is stateless (StudyOS dedupes by external_id and detects content
 // changes), so losing this on restart only costs one extra sweep.
-const lastEvalSync = new Map<string, number>();
+const lastEvalSlot = new Map<string, string>();
 
 export function buildEvaluationItemPayload(
   course: ScrapedEvaluationCourse,
@@ -312,8 +353,10 @@ export interface EvaluationScraper {
 
 /**
  * Scrapes the per-course Evaluaciones rubric and forwards every assignment
- * to the user's StudyOS. Throttled per user (STUDYOS_EVAL_SYNC_MINUTES,
- * default 30) because the rubric changes far less often than the cron cycle.
+ * to the user's StudyOS. Runs once per schedule slot per user
+ * (STUDYOS_EVAL_SYNC_HOURS, default "7,12,17" in STUDYOS_EVAL_SYNC_TZ,
+ * default America/Costa_Rica): the cron cycle calls this every few minutes
+ * and it no-ops until the next slot boundary passes.
  * Stateless: every sweep re-posts everything; StudyOS answers duplicate for
  * unchanged items and updated when a grade/due date appears. Never throws.
  */
@@ -326,9 +369,9 @@ export async function syncEvaluations(
   const target = getStudyosTarget(user);
   if (!target) return;
 
-  const last = lastEvalSync.get(user.id) ?? 0;
-  if (Date.now() - last < EVAL_SYNC_INTERVAL_MS) return;
-  lastEvalSync.set(user.id, Date.now());
+  const slot = currentEvalSlot();
+  if (lastEvalSlot.get(user.id) === slot) return;
+  lastEvalSlot.set(user.id, slot);
 
   const log = logger.child({ component: 'studyos_evaluations', userId: user.id });
 
@@ -385,8 +428,8 @@ export async function syncEvaluations(
 
     log.info({ courses: courses.length, sent, failed }, 'Evaluations sweep finished');
   } catch (err) {
-    // Full-sweep failure: clear the throttle so the next cycle retries.
-    lastEvalSync.set(user.id, 0);
+    // Full-sweep failure: clear the slot so the next cycle retries.
+    lastEvalSlot.delete(user.id);
     log.warn(
       { errorMessage: err instanceof Error ? err.message : String(err) },
       'Evaluations sweep failed',
@@ -394,9 +437,9 @@ export async function syncEvaluations(
   }
 }
 
-/** Test hook: resets the per-user evaluations throttle. */
+/** Test hook: resets the per-user evaluations schedule state. */
 export function resetEvaluationSyncThrottle(): void {
-  lastEvalSync.clear();
+  lastEvalSlot.clear();
 }
 
 /**
