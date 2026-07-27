@@ -50,6 +50,16 @@
 2. [ ] Agregar migracion con ENABLE RLS + policies.
 3. [ ] Ajustar acceso DB para setear user_id en la sesion.
 
+# Plan: Estabilizar alertas de fallos de scrape
+
+1. [x] Confirmar en producción que el stack activo es TecBot y que los ciclos actuales están limpios.
+2. [x] Identificar que `cycle_stats` conserva solo el último ciclo y que falta aplicar `014_error_log.sql` en producción.
+3. [x] Agregar estado persistente por alerta y transiciones con ciclos consecutivos de fallo/recuperación.
+4. [x] Clasificar `scrape_failed` exclusivamente para `process-sequential`; registrar fallos externos como `orchestration_failed`.
+5. [x] Exponer los nuevos umbrales en configuración y cubrir flapping, recuperación y persistencia con pruebas.
+6. [x] Ejecutar tests y build; lint global sigue fallando por problemas preexistentes fuera de este cambio.
+7. [ ] Hacer commit, push y verificar en producción que las migraciones se aplicaron.
+
 ## Review
 
 - [ ] Cambios revisados y verificados

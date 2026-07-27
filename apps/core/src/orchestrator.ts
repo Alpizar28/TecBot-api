@@ -9,6 +9,9 @@ import {
   saveCycleStats,
   insertErrorLog,
   purgeOldErrors,
+  getAdminAlertStates,
+  saveAdminAlertStates,
+  type AdminAlertState,
   encrypt,
   decrypt,
 } from '@tec-brain/database';
@@ -40,17 +43,29 @@ const ALERT_USER_FAILURES_THRESHOLD = parseInt(
   process.env.ALERT_USER_FAILURES_THRESHOLD ?? '1',
   10,
 );
+const ALERT_USER_FAILURES_CONSECUTIVE = parseInt(
+  process.env.ALERT_USER_FAILURES_CONSECUTIVE ?? '2',
+  10,
+);
+const ALERT_USER_RECOVERY_CONSECUTIVE = parseInt(
+  process.env.ALERT_USER_RECOVERY_CONSECUTIVE ?? '2',
+  10,
+);
 const ADMIN_ALERT_CHAT_ID = process.env.ADMIN_ALERT_CHAT_ID ?? '';
 // While a failure stays broken, remind at most this often (default 6 h);
 // otherwise alerts fire only on state transitions (started failing / recovered).
 const ADMIN_ALERT_REMIND_MS =
   parseInt(process.env.ADMIN_ALERT_COOLDOWN_MINUTES ?? '360', 10) * 60_000;
 
-// key → last-sent ms; a key being present means that alert is currently firing.
-const adminAlertTimestamps: Record<string, number> = {};
-
 // Singleton Telegram service
 const telegram = new TelegramService(process.env.TELEGRAM_BOT_TOKEN ?? '');
+
+class ScrapeFailureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ScrapeFailureError';
+  }
+}
 
 // Load OAuth client config once at startup (used to build per-user DriveService)
 let oauthClient: OAuthClient | null = null;
@@ -139,10 +154,16 @@ export async function runOrchestrationCycle(): Promise<void> {
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
           const isAuthError = errorMsg.includes('Session invalid after re-authentication');
+          const isScrapeFailure = err instanceof ScrapeFailureError;
+          const action = isAuthError
+            ? 'tec_auth_failed'
+            : isScrapeFailure
+              ? 'scrape_failed'
+              : 'orchestration_failed';
 
           void insertErrorLog({
             user_id: user.id,
-            action: isAuthError ? 'tec_auth_failed' : 'scrape_failed',
+            action,
             error_message: errorMsg,
           }).catch(() => {});
 
@@ -178,7 +199,7 @@ export async function runOrchestrationCycle(): Promise<void> {
                 );
               }
             }
-          } else {
+          } else if (isScrapeFailure) {
             cycleStats.usersFailed += 1;
             logger.error(
               {
@@ -187,7 +208,17 @@ export async function runOrchestrationCycle(): Promise<void> {
                 action: 'scrape_failed',
                 errorMessage: errorMsg,
               },
-              'User orchestration failed',
+              'User scrape failed',
+            );
+          } else {
+            logger.error(
+              {
+                component: 'orchestrator',
+                userId: user.id,
+                action: 'orchestration_failed',
+                errorMessage: errorMsg,
+              },
+              'User orchestration failed outside scraper',
             );
           }
         }
@@ -384,30 +415,33 @@ async function processUser(
   );
 
   // Alert queue (upcoming deadlines, published grades) → Telegram.
-  await forwardStudyosAlerts(user, (html) =>
-    telegram.sendMessage(user.telegram_chat_id, html),
-  );
+  await forwardStudyosAlerts(user, (html) => telegram.sendMessage(user.telegram_chat_id, html));
 
-  const response = await requestWithRetry(
-    () =>
-      axios.post<ScrapeResponse>(
-        `${SCRAPER_URL}/process-sequential/${user.id}`,
-        {
-          username: user.tec_username,
-          password,
-          dispatchUrl: `http://core:${process.env.PORT ?? '3002'}/api/internal-dispatch`,
-          dispatchSecret: process.env.INTERNAL_API_SECRET ?? '',
-        },
-        {
-          timeout: 300_000,
-          headers: scraperSecret ? { 'x-scraper-secret': scraperSecret } : {},
-        },
-      ),
-    'scraper.process_sequential',
-  );
+  let response: { data: ScrapeResponse };
+  try {
+    response = await requestWithRetry(
+      () =>
+        axios.post<ScrapeResponse>(
+          `${SCRAPER_URL}/process-sequential/${user.id}`,
+          {
+            username: user.tec_username,
+            password,
+            dispatchUrl: `http://core:${process.env.PORT ?? '3002'}/api/internal-dispatch`,
+            dispatchSecret: process.env.INTERNAL_API_SECRET ?? '',
+          },
+          {
+            timeout: 300_000,
+            headers: scraperSecret ? { 'x-scraper-secret': scraperSecret } : {},
+          },
+        ),
+      'scraper.process_sequential',
+    );
 
-  if (response.data.status === 'error') {
-    throw new Error(response.data.error || 'Unknown scraper error');
+    if (response.data.status === 'error') {
+      throw new Error(response.data.error || 'Unknown scraper error');
+    }
+  } catch (err) {
+    throw new ScrapeFailureError(err instanceof Error ? err.message : String(err));
   }
 
   // By the time the scraper call resolves, it has POSTed every notification
@@ -442,28 +476,32 @@ async function evaluateAlerts(cycleStats: {
       ? Math.round((cycleStats.notificationsPartial / cycleStats.notificationsDispatched) * 100)
       : 0;
 
-  const alerts: Array<{ key: string; text: string }> = [];
-  if (partialPct >= ALERT_PARTIAL_THRESHOLD_PCT) {
-    const dominant = dominantDispatchError(recentDispatchErrors);
-    alerts.push({
+  const dominant = dominantDispatchError(recentDispatchErrors);
+  const alerts: AlertObservation[] = [
+    {
       key: 'notifications_partial',
       text:
         `⚠️ ${cycleStats.notificationsPartial}/${cycleStats.notificationsDispatched} notificaciones (${partialPct}%) fallaron y se reintentarán cada ciclo` +
         (dominant ? `. Error dominante: ${dominant}` : ''),
-    });
-  }
-  if (cycleStats.usersFailed >= ALERT_USER_FAILURES_THRESHOLD) {
-    alerts.push({
+      active: partialPct >= ALERT_PARTIAL_THRESHOLD_PCT,
+      failureCycles: 1,
+      recoveryCycles: 1,
+    },
+    {
       key: 'users_failed',
       text: `⚠️ ${cycleStats.usersFailed}/${cycleStats.usersTotal} usuarios fallaron el scrape`,
-    });
-  }
+      active: cycleStats.usersFailed >= ALERT_USER_FAILURES_THRESHOLD,
+      failureCycles: ALERT_USER_FAILURES_CONSECUTIVE,
+      recoveryCycles: ALERT_USER_RECOVERY_CONSECUTIVE,
+    },
+  ];
+  const activeAlerts = alerts.filter((alert) => alert.active);
 
-  if (alerts.length > 0) {
+  if (activeAlerts.length > 0) {
     logger.error(
       {
         component: 'orchestrator',
-        alerts: alerts.map((a) => a.text),
+        alerts: activeAlerts.map((alert) => alert.text),
         cycleStats,
       },
       'Automatic cycle alerts triggered',
@@ -472,12 +510,21 @@ async function evaluateAlerts(cycleStats: {
 
   if (!ADMIN_ALERT_CHAT_ID) return;
 
-  const transitions = selectAlertTransitions(
-    alerts,
-    adminAlertTimestamps,
-    Date.now(),
-    ADMIN_ALERT_REMIND_MS,
-  );
+  let transitions: AlertTransition[];
+  try {
+    const persisted = await getAdminAlertStates(alerts.map((alert) => alert.key));
+    const state = Object.fromEntries(
+      persisted.map((entry) => [entry.alert_key, toAlertState(entry)]),
+    ) as Record<string, AlertState>;
+    transitions = selectAlertTransitions(alerts, state, Date.now(), ADMIN_ALERT_REMIND_MS);
+    await saveAdminAlertStates(Object.values(state).map(toPersistedAlertState));
+  } catch (error) {
+    logger.error(
+      { component: 'orchestrator', error },
+      'Failed to load or persist admin alert state',
+    );
+    return;
+  }
   for (const t of transitions) {
     const text =
       t.kind === 'recovered'
@@ -488,10 +535,7 @@ async function evaluateAlerts(cycleStats: {
     try {
       await telegram.sendMessage(ADMIN_ALERT_CHAT_ID, escapeHtml(text));
     } catch (error) {
-      logger.error(
-        { component: 'orchestrator', error },
-        'Failed to send admin alert via Telegram',
-      );
+      logger.error({ component: 'orchestrator', error }, 'Failed to send admin alert via Telegram');
     }
   }
 }
@@ -502,41 +546,94 @@ export interface AlertTransition {
   kind: 'fired' | 'reminder' | 'recovered';
 }
 
+export interface AlertObservation {
+  key: string;
+  text: string;
+  active: boolean;
+  failureCycles: number;
+  recoveryCycles: number;
+}
+
+export interface AlertState {
+  key: string;
+  isFiring: boolean;
+  failureStreak: number;
+  recoveryStreak: number;
+  lastSentAt: number | null;
+}
+
 /**
- * State-transition alert selection: an alert is sent once when its key starts
- * firing, re-sent as a reminder every `remindMs` while it stays active, and a
- * recovery notice is emitted when it stops firing. `state` maps key → last-sent
- * ms (presence = currently firing) and is mutated in place. Pure aside from
- * that mutation — no env, network, or clock reads — so it is unit-testable.
+ * State-transition alert selection with consecutive-cycle debounce. State is
+ * supplied by the database and mutated in place so callers can persist it.
  */
 export function selectAlertTransitions(
-  active: Array<{ key: string; text: string }>,
-  state: Record<string, number>,
+  observations: AlertObservation[],
+  state: Record<string, AlertState>,
   now: number,
   remindMs: number,
 ): AlertTransition[] {
   const out: AlertTransition[] = [];
-  const activeKeys = new Set(active.map((a) => a.key));
 
-  for (const key of Object.keys(state)) {
-    if (!activeKeys.has(key)) {
-      delete state[key];
-      out.push({ key, text: '', kind: 'recovered' });
-    }
-  }
+  for (const alert of observations) {
+    const current =
+      state[alert.key] ??
+      ({
+        key: alert.key,
+        isFiring: false,
+        failureStreak: 0,
+        recoveryStreak: 0,
+        lastSentAt: null,
+      } satisfies AlertState);
 
-  for (const alert of active) {
-    const lastSent = state[alert.key];
-    if (lastSent === undefined) {
-      state[alert.key] = now;
-      out.push({ ...alert, kind: 'fired' });
-    } else if (now - lastSent >= remindMs) {
-      state[alert.key] = now;
-      out.push({ ...alert, kind: 'reminder' });
+    if (alert.active) {
+      current.failureStreak += 1;
+      current.recoveryStreak = 0;
+      if (!current.isFiring && current.failureStreak >= Math.max(1, alert.failureCycles)) {
+        current.isFiring = true;
+        current.lastSentAt = now;
+        out.push({ key: alert.key, text: alert.text, kind: 'fired' });
+      } else if (
+        current.isFiring &&
+        current.lastSentAt !== null &&
+        now - current.lastSentAt >= remindMs
+      ) {
+        current.lastSentAt = now;
+        out.push({ key: alert.key, text: alert.text, kind: 'reminder' });
+      }
+    } else {
+      current.failureStreak = 0;
+      current.recoveryStreak = current.isFiring ? current.recoveryStreak + 1 : 0;
+      if (current.isFiring && current.recoveryStreak >= Math.max(1, alert.recoveryCycles)) {
+        current.isFiring = false;
+        current.recoveryStreak = 0;
+        current.lastSentAt = null;
+        out.push({ key: alert.key, text: '', kind: 'recovered' });
+      }
     }
+    state[alert.key] = current;
   }
 
   return out;
+}
+
+function toAlertState(entry: AdminAlertState): AlertState {
+  return {
+    key: entry.alert_key,
+    isFiring: entry.is_firing,
+    failureStreak: entry.failure_streak,
+    recoveryStreak: entry.recovery_streak,
+    lastSentAt: entry.last_sent_at?.getTime() ?? null,
+  };
+}
+
+function toPersistedAlertState(state: AlertState): AdminAlertState {
+  return {
+    alert_key: state.key,
+    is_firing: state.isFiring,
+    failure_streak: state.failureStreak,
+    recovery_streak: state.recoveryStreak,
+    last_sent_at: state.lastSentAt === null ? null : new Date(state.lastSentAt),
+  };
 }
 
 /**

@@ -1042,4 +1042,53 @@ export async function purgeOldErrors(days: number): Promise<void> {
   ]);
 }
 
+// ─── Admin alert state (durable debounce across core restarts) ────────────────
+
+export interface AdminAlertState {
+  alert_key: string;
+  is_firing: boolean;
+  failure_streak: number;
+  recovery_streak: number;
+  last_sent_at: Date | null;
+}
+
+export async function getAdminAlertStates(keys: string[]): Promise<AdminAlertState[]> {
+  if (keys.length === 0) return [];
+  const pool = getPool();
+  const res = await pool.query<AdminAlertState>(
+    `SELECT alert_key, is_firing, failure_streak, recovery_streak, last_sent_at
+       FROM admin_alert_state
+      WHERE alert_key = ANY($1::text[])`,
+    [keys],
+  );
+  return res.rows;
+}
+
+export async function saveAdminAlertStates(states: AdminAlertState[]): Promise<void> {
+  if (states.length === 0) return;
+  const pool = getPool();
+  await Promise.all(
+    states.map((state) =>
+      pool.query(
+        `INSERT INTO admin_alert_state (
+           alert_key, is_firing, failure_streak, recovery_streak, last_sent_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, now())
+         ON CONFLICT (alert_key) DO UPDATE SET
+           is_firing = EXCLUDED.is_firing,
+           failure_streak = EXCLUDED.failure_streak,
+           recovery_streak = EXCLUDED.recovery_streak,
+           last_sent_at = EXCLUDED.last_sent_at,
+           updated_at = now()`,
+        [
+          state.alert_key,
+          state.is_firing,
+          state.failure_streak,
+          state.recovery_streak,
+          state.last_sent_at,
+        ],
+      ),
+    ),
+  );
+}
+
 export type { pg };

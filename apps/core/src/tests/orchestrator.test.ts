@@ -1,62 +1,89 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
+import type { AlertState } from '../orchestrator.js';
 
 // ─── Test: Admin alert transitions ────────────────────────────────────────────
 
 describe('selectAlertTransitions', () => {
   const REMIND = 6 * 60 * 60_000; // 6 h
-  const alerts = [{ key: 'users_failed', text: 'users_failed=1/3' }];
+  const failingScrape = [
+    {
+      key: 'users_failed',
+      text: 'users_failed=1/3',
+      active: true,
+      failureCycles: 2,
+      recoveryCycles: 2,
+    },
+  ];
+  const cleanScrape = [{ ...failingScrape[0], active: false }];
 
   // orchestrator.ts instantiates a TelegramService singleton at import time,
   // which requires a token — set one before importing the module under test.
-  let selectAlertTransitions: typeof import('../orchestrator.js')['selectAlertTransitions'];
-  let dominantDispatchError: typeof import('../orchestrator.js')['dominantDispatchError'];
+  let selectAlertTransitions: (typeof import('../orchestrator.js'))['selectAlertTransitions'];
+  let dominantDispatchError: (typeof import('../orchestrator.js'))['dominantDispatchError'];
   beforeAll(async () => {
     process.env.TELEGRAM_BOT_TOKEN = 'test-token';
     ({ selectAlertTransitions, dominantDispatchError } = await import('../orchestrator.js'));
   });
 
-  it('fires an alert the first time its key is seen', () => {
-    const state: Record<string, number> = {};
-    const out = selectAlertTransitions(alerts, state, 1_000, REMIND);
-    expect(out).toEqual([{ key: 'users_failed', text: 'users_failed=1/3', kind: 'fired' }]);
-    expect(state.users_failed).toBe(1_000);
+  it('waits for consecutive failed cycles before firing', () => {
+    const state: Record<string, AlertState> = {};
+    expect(selectAlertTransitions(failingScrape, state, 1_000, REMIND)).toEqual([]);
+    expect(selectAlertTransitions(failingScrape, state, 2_000, REMIND)).toEqual([
+      { key: 'users_failed', text: 'users_failed=1/3', kind: 'fired' },
+    ]);
+    expect(state.users_failed).toMatchObject({
+      isFiring: true,
+      failureStreak: 2,
+      lastSentAt: 2_000,
+    });
   });
 
-  it('stays silent while the alert persists within the remind window', () => {
-    const state: Record<string, number> = {};
-    selectAlertTransitions(alerts, state, 1_000, REMIND);
-    const second = selectAlertTransitions(alerts, state, 1_000 + REMIND - 1, REMIND);
-    expect(second).toHaveLength(0);
+  it('does not flap on a failed cycle followed by a clean cycle', () => {
+    const state: Record<string, AlertState> = {};
+    selectAlertTransitions(failingScrape, state, 1_000, REMIND);
+    expect(selectAlertTransitions(cleanScrape, state, 2_000, REMIND)).toEqual([]);
+    expect(state.users_failed).toMatchObject({ isFiring: false, failureStreak: 0 });
   });
 
-  it('sends a reminder once the remind window elapses', () => {
-    const state: Record<string, number> = {};
-    selectAlertTransitions(alerts, state, 1_000, REMIND);
-    const later = selectAlertTransitions(alerts, state, 1_000 + REMIND, REMIND);
-    expect(later).toEqual([{ key: 'users_failed', text: 'users_failed=1/3', kind: 'reminder' }]);
-    expect(state.users_failed).toBe(1_000 + REMIND);
+  it('requires consecutive clean cycles before recovery', () => {
+    const state: Record<string, AlertState> = {};
+    selectAlertTransitions(failingScrape, state, 1_000, REMIND);
+    selectAlertTransitions(failingScrape, state, 2_000, REMIND);
+    expect(selectAlertTransitions(cleanScrape, state, 3_000, REMIND)).toEqual([]);
+    expect(selectAlertTransitions(cleanScrape, state, 4_000, REMIND)).toEqual([
+      { key: 'users_failed', text: '', kind: 'recovered' },
+    ]);
   });
 
-  it('emits a recovery notice when the alert stops firing', () => {
-    const state: Record<string, number> = {};
-    selectAlertTransitions(alerts, state, 1_000, REMIND);
-    const out = selectAlertTransitions([], state, 2_000, REMIND);
-    expect(out).toEqual([{ key: 'users_failed', text: '', kind: 'recovered' }]);
-    expect(state.users_failed).toBeUndefined();
+  it('sends a reminder while a persisted alert remains active', () => {
+    const state: Record<string, AlertState> = {};
+    selectAlertTransitions(failingScrape, state, 1_000, REMIND);
+    selectAlertTransitions(failingScrape, state, 2_000, REMIND);
+    expect(selectAlertTransitions(failingScrape, state, 2_000 + REMIND, REMIND)).toEqual([
+      { key: 'users_failed', text: 'users_failed=1/3', kind: 'reminder' },
+    ]);
   });
 
-  it('handles keys independently: one recovers while another fires', () => {
-    const state: Record<string, number> = { users_failed: 1_000 };
+  it('keeps independent alert keys in persistent state', () => {
+    const state: Record<string, AlertState> = {};
+    selectAlertTransitions(failingScrape, state, 1_000, REMIND);
+    selectAlertTransitions(failingScrape, state, 2_000, REMIND);
     const out = selectAlertTransitions(
-      [{ key: 'notifications_partial', text: 'partial=2/5 (40%)' }],
+      [
+        { ...cleanScrape[0] },
+        {
+          key: 'notifications_partial',
+          text: 'partial=2/5 (40%)',
+          active: true,
+          failureCycles: 1,
+          recoveryCycles: 1,
+        },
+      ],
       state,
-      1_500,
+      3_000,
       REMIND,
     );
-    expect(out.map((t) => [t.key, t.kind])).toEqual([
-      ['users_failed', 'recovered'],
-      ['notifications_partial', 'fired'],
-    ]);
+    expect(out.map((t) => [t.key, t.kind])).toEqual([['notifications_partial', 'fired']]);
   });
 
   it('dominantDispatchError returns the most frequent message with its count', () => {
