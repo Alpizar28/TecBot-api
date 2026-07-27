@@ -1,4 +1,3 @@
-import axios from 'axios';
 import {
   getActiveUsers,
   getUserById,
@@ -33,11 +32,12 @@ import {
 } from './studyos.js';
 import pLimit from 'p-limit';
 import type { ScrapeResponse } from '@tec-brain/types';
+import {
+  processUserNotifications,
+  getUserEvaluations,
+  downloadTecFile,
+} from './scraper/index.js';
 import { logger } from './logger.js';
-
-const SCRAPER_URL = process.env.SCRAPER_URL ?? 'http://scraper:3001';
-const HTTP_RETRY_ATTEMPTS = parseInt(process.env.HTTP_RETRY_ATTEMPTS ?? '3', 10);
-const HTTP_RETRY_BASE_MS = parseInt(process.env.HTTP_RETRY_BASE_MS ?? '400', 10);
 const ALERT_PARTIAL_THRESHOLD_PCT = parseInt(process.env.ALERT_PARTIAL_THRESHOLD_PCT ?? '20', 10);
 const ALERT_USER_FAILURES_THRESHOLD = parseInt(
   process.env.ALERT_USER_FAILURES_THRESHOLD ?? '1',
@@ -59,13 +59,6 @@ const ADMIN_ALERT_REMIND_MS =
 
 // Singleton Telegram service
 const telegram = new TelegramService(process.env.TELEGRAM_BOT_TOKEN ?? '');
-
-class ScrapeFailureError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ScrapeFailureError';
-  }
-}
 
 // Load OAuth client config once at startup (used to build per-user DriveService)
 let oauthClient: OAuthClient | null = null;
@@ -93,10 +86,6 @@ try {
 }
 
 let running = false;
-const endpointMetrics: Record<
-  string,
-  { calls: number; ok: number; failed: number; retries: number; totalMs: number }
-> = {};
 
 // Per-user dispatch tallies for the current cycle. The scraper delivers each
 // notification back via the /api/internal-dispatch callback (handled by
@@ -154,12 +143,9 @@ export async function runOrchestrationCycle(): Promise<void> {
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
           const isAuthError = errorMsg.includes('Session invalid after re-authentication');
-          const isScrapeFailure = err instanceof ScrapeFailureError;
           const action = isAuthError
             ? 'tec_auth_failed'
-            : isScrapeFailure
-              ? 'scrape_failed'
-              : 'orchestration_failed';
+            : 'orchestration_failed';
 
           void insertErrorLog({
             user_id: user.id,
@@ -199,17 +185,6 @@ export async function runOrchestrationCycle(): Promise<void> {
                 );
               }
             }
-          } else if (isScrapeFailure) {
-            cycleStats.usersFailed += 1;
-            logger.error(
-              {
-                component: 'orchestrator',
-                userId: user.id,
-                action: 'scrape_failed',
-                errorMessage: errorMsg,
-              },
-              'User scrape failed',
-            );
           } else {
             logger.error(
               {
@@ -227,10 +202,6 @@ export async function runOrchestrationCycle(): Promise<void> {
 
     await Promise.all(tasks);
     logger.info({ component: 'orchestrator', cycleStats }, 'Cycle metrics');
-    logger.info(
-      { component: 'orchestrator', endpointMetrics: serializeEndpointMetrics() },
-      'Endpoint metrics',
-    );
     await evaluateAlerts(cycleStats);
 
     // Persist the cycle summary so the bot can answer /status from the DB.
@@ -325,7 +296,6 @@ export async function handleInternalDispatch(
   const result = await dispatch(
     user,
     notification,
-    SCRAPER_URL,
     decrypt(user.tec_password_enc),
     telegram,
     storage,
@@ -372,36 +342,18 @@ async function processUser(
     ),
   );
 
-  const scraperSecret = process.env.SCRAPER_SECRET;
-
   // Evaluations rubric sweep (throttled inside; no-op without StudyOS config).
   await syncEvaluations(
     user,
     async (username, tecPassword) => {
-      const res = await axios.post<{ status: string; courses: never[]; error?: string }>(
-        `${SCRAPER_URL}/scrape-evaluations`,
-        { username, password: tecPassword },
-        { timeout: 300_000, headers: scraperSecret ? { 'x-scraper-secret': scraperSecret } : {} },
-      );
-      if (res.data.status !== 'success') {
-        throw new Error(res.data.error || 'scrape-evaluations failed');
-      }
-      return res.data.courses;
+      const courses = await getUserEvaluations(username, tecPassword);
+      return courses as never[];
     },
     { username: user.tec_username, password },
     (async (downloadUrl: string) => {
-      const res = await axios.post<ArrayBuffer>(
-        `${SCRAPER_URL}/download-file`,
-        { username: user.tec_username, password, downloadUrl },
-        {
-          responseType: 'arraybuffer',
-          timeout: 60_000,
-          headers: scraperSecret ? { 'x-scraper-secret': scraperSecret } : {},
-        },
-      );
-      const contentType =
-        (res.headers['content-type'] as string | undefined) ?? 'application/octet-stream';
-      return { data: res.data, contentType };
+      const result = await downloadTecFile(user.tec_username, password, downloadUrl);
+      if (!result) throw new Error('Failed to download file');
+      return result;
     }) satisfies FileDownloader,
   ).catch((err) =>
     logger.warn(
@@ -417,31 +369,19 @@ async function processUser(
   // Alert queue (upcoming deadlines, published grades) → Telegram.
   await forwardStudyosAlerts(user, (html) => telegram.sendMessage(user.telegram_chat_id, html));
 
-  let response: { data: ScrapeResponse };
   try {
-    response = await requestWithRetry(
-      () =>
-        axios.post<ScrapeResponse>(
-          `${SCRAPER_URL}/process-sequential/${user.id}`,
-          {
-            username: user.tec_username,
-            password,
-            dispatchUrl: `http://core:${process.env.PORT ?? '3002'}/api/internal-dispatch`,
-            dispatchSecret: process.env.INTERNAL_API_SECRET ?? '',
-          },
-          {
-            timeout: 300_000,
-            headers: scraperSecret ? { 'x-scraper-secret': scraperSecret } : {},
-          },
-        ),
-      'scraper.process_sequential',
+    const result = await processUserNotifications(
+      user.tec_username,
+      password,
+      user.id,
+      (notification) => handleInternalDispatch(user.id, notification, []),
     );
 
-    if (response.data.status === 'error') {
-      throw new Error(response.data.error || 'Unknown scraper error');
+    if (result === 'error') {
+      throw new Error('Sequential notification processing failed');
     }
   } catch (err) {
-    throw new ScrapeFailureError(err instanceof Error ? err.message : String(err));
+    throw new Error(err instanceof Error ? err.message : String(err));
   }
 
   // By the time the scraper call resolves, it has POSTed every notification
@@ -646,92 +586,6 @@ export function dominantDispatchError(errors: readonly string[]): string | null 
   for (const e of errors) counts.set(e, (counts.get(e) ?? 0) + 1);
   const [top, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
   return `${top} (${n}/${errors.length})`;
-}
-
-async function requestWithRetry<T>(request: () => Promise<T>, endpoint: string): Promise<T> {
-  const maxAttempts = Math.max(1, HTTP_RETRY_ATTEMPTS);
-  const metric = getMetric(endpoint);
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const startedAt = Date.now();
-    try {
-      const result = await request();
-      metric.calls += 1;
-      metric.ok += 1;
-      metric.totalMs += Date.now() - startedAt;
-      if (attempt > 1) metric.retries += attempt - 1;
-      return result;
-    } catch (error) {
-      metric.calls += 1;
-      metric.failed += 1;
-      metric.totalMs += Date.now() - startedAt;
-
-      if (!isRetryableHttpError(error) || attempt === maxAttempts) {
-        throw error;
-      }
-
-      const sleepMs = backoffWithJitter(attempt, HTTP_RETRY_BASE_MS);
-      logger.warn(
-        { component: 'orchestrator', endpoint, attempt, sleepMs },
-        'Retrying endpoint call',
-      );
-      await sleep(sleepMs);
-    }
-  }
-
-  throw new Error(`Retry loop exhausted for ${endpoint}`);
-}
-
-function getMetric(endpoint: string): {
-  calls: number;
-  ok: number;
-  failed: number;
-  retries: number;
-  totalMs: number;
-} {
-  if (!endpointMetrics[endpoint]) {
-    endpointMetrics[endpoint] = { calls: 0, ok: 0, failed: 0, retries: 0, totalMs: 0 };
-  }
-  return endpointMetrics[endpoint];
-}
-
-function serializeEndpointMetrics(): Array<Record<string, unknown>> {
-  return Object.entries(endpointMetrics).map(([endpoint, metric]) => ({
-    endpoint,
-    ...metric,
-    avgMs: metric.calls > 0 ? Math.round(metric.totalMs / metric.calls) : 0,
-  }));
-}
-
-// Transient low-level network conditions worth retrying when there is no HTTP
-// response (connection reset, timeout, transient DNS failure).
-const TRANSIENT_NETWORK_CODES = new Set([
-  'ECONNRESET',
-  'ETIMEDOUT',
-  'ECONNABORTED',
-  'ECONNREFUSED',
-  'EAI_AGAIN',
-]);
-
-function isRetryableHttpError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) return false; // unknown bug (e.g. TypeError): do not retry
-  const status = error.response?.status;
-  if (status === undefined) {
-    // No HTTP response — retry only known transient network errors.
-    return error.code !== undefined && TRANSIENT_NETWORK_CODES.has(error.code);
-  }
-  return status >= 500 || status === 408 || status === 429;
-}
-
-function backoffWithJitter(attempt: number, baseMs: number): number {
-  const cappedAttempt = Math.min(attempt, 6);
-  const exp = baseMs * 2 ** (cappedAttempt - 1);
-  const jitter = Math.floor(Math.random() * baseMs);
-  return exp + jitter;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function escapeHtml(text: string): string {

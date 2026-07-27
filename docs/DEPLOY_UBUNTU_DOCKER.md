@@ -40,9 +40,8 @@ Variables mínimas a definir:
 - `DB_ENCRYPTION_KEY` (64 hex)
 - `TELEGRAM_BOT_TOKEN`
 - `GOOGLE_DRIVE_CREDENTIALS_PATH`
-- `CRON_SCHEDULE`
+- `CYCLE_INTERVAL_MS`
 - `CORE_CONCURRENCY`
-- `SCRAPER_URL` (`http://scraper:3001`)
 - `SESSION_DIR` (`./data/sessions`)
 
 Variables recomendadas:

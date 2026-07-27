@@ -142,7 +142,7 @@ Servicio HTTP + cron que administra el ciclo completo de automatización.
 
 ### Funcionalidades del core
 - Ejecuta migraciones al arrancar.
-- Programa ejecución periódica por cron (`CRON_SCHEDULE`).
+- Ciclo continuo con setTimeout y backoff exponencial (`CYCLE_INTERVAL_MS`).
 - Ejecuta un ciclo inmediato al iniciar.
 - Evita ejecuciones concurrentes del ciclo (`running` guard).
 - Lee usuarios activos desde DB.
@@ -313,14 +313,9 @@ Campos clave:
 - `GOOGLE_DRIVE_TOKEN_PATH` (opcional; para OAuth)
 
 ### Core
-- `CRON_SCHEDULE`
+- `CYCLE_INTERVAL_MS`
 - `CORE_CONCURRENCY`
-- `SCRAPER_URL`
-
-### Scraper
 - `SESSION_DIR`
-- `PORT`
-- `HOST` (opcional)
 - `LOG_LEVEL` (opcional)
 
 ## Estado de Calidad / Testing

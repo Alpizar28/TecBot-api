@@ -2,7 +2,6 @@ import 'dotenv/config';
 import { timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import helmet from '@fastify/helmet';
-import cron from 'node-cron';
 import {
   getPool,
   runMigrations,
@@ -27,7 +26,9 @@ import type { RawNotification, ScrapeResponse } from '@tec-brain/types';
 import { logger } from './logger.js';
 
 const PORT = parseInt(process.env.PORT ?? '3002', 10);
-const CRON_SCHEDULE = process.env.CRON_SCHEDULE ?? '*/5 * * * *'; // Every 5 min
+const CYCLE_INTERVAL_MS = parseInt(process.env.CYCLE_INTERVAL_MS ?? '300000', 10);
+const MAX_CYCLE_BACKOFF_MS = parseInt(process.env.MAX_CYCLE_BACKOFF_MS ?? '3600000', 10);
+const BASE_CYCLE_BACKOFF_MS = parseInt(process.env.BASE_CYCLE_BACKOFF_MS ?? '30000', 10);
 
 /**
  * Constant-time comparison of a request-provided secret against the expected
@@ -303,22 +304,6 @@ async function main() {
   await fastify.listen({ port: PORT, host: '0.0.0.0' });
   logger.info({ component: 'core_startup', port: PORT }, 'Core listening');
 
-  if (!cron.validate(CRON_SCHEDULE)) {
-    logger.error(
-      { component: 'core_startup', cronSchedule: CRON_SCHEDULE },
-      'Invalid CRON_SCHEDULE',
-    );
-    process.exit(1);
-  }
-
-  const job = cron.schedule(CRON_SCHEDULE, () => {
-    logger.info(
-      { component: 'core_cron', cronSchedule: CRON_SCHEDULE },
-      'Running scheduled orchestration cycle',
-    );
-    void runOrchestrationCycle();
-  });
-
   // Purge expired OAuth states every hour to prevent table bloat
   const OAUTH_PURGE_INTERVAL_MS = 60 * 60 * 1000;
   const oauthPurgeTimer = setInterval(() => {
@@ -333,12 +318,56 @@ async function main() {
       });
   }, OAUTH_PURGE_INTERVAL_MS);
 
-  logger.info({ component: 'core_startup', cronSchedule: CRON_SCHEDULE }, 'Cron scheduled');
+  let cycleTimer: ReturnType<typeof setTimeout> | null = null;
+  let consecutiveFailures = 0;
+
+  async function runCycle(): Promise<void> {
+    try {
+      await runOrchestrationCycle();
+      consecutiveFailures = 0;
+    } catch (err) {
+      consecutiveFailures += 1;
+      logger.error(
+        {
+          component: 'core_cycle',
+          consecutiveFailures,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        'Cycle threw unexpectedly — will retry with backoff',
+      );
+    }
+
+    const delay = consecutiveFailures > 0
+      ? Math.min(
+          BASE_CYCLE_BACKOFF_MS * Math.pow(2, consecutiveFailures - 1),
+          MAX_CYCLE_BACKOFF_MS,
+        )
+      : CYCLE_INTERVAL_MS;
+
+    if (consecutiveFailures > 0) {
+      logger.info(
+        {
+          component: 'core_cycle',
+          delayMs: delay,
+          consecutiveFailures,
+        },
+        'Scheduling next cycle with exponential backoff',
+      );
+    }
+
+    cycleTimer = setTimeout(() => void runCycle(), delay);
+  }
+
+  logger.info(
+    { component: 'core_startup', cycleIntervalMs: CYCLE_INTERVAL_MS },
+    'Starting cycle loop',
+  );
   logger.info({ component: 'core_startup' }, 'Running initial orchestration cycle');
   await runOrchestrationCycle();
+  runCycle();
 
   const shutdown = async () => {
-    job.stop();
+    if (cycleTimer !== null) clearTimeout(cycleTimer);
     clearInterval(oauthPurgeTimer);
     await fastify.close();
     await getPool().end();

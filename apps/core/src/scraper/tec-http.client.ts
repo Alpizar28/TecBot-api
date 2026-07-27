@@ -1,7 +1,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { wrapper } from 'axios-cookiejar-support';
 import { CookieJar } from 'tough-cookie';
-import { logger as appLogger } from '../logger.js';
+import { logger } from '../logger.js';
 
 interface LoggerLike {
     info: (...args: unknown[]) => void;
@@ -15,8 +15,8 @@ export class TecHttpClient {
     public readonly jar: CookieJar;
     private readonly logger: LoggerLike;
 
-    constructor(logger: LoggerLike = appLogger.child({ component: 'tec_http_client' })) {
-        this.logger = logger;
+    constructor(logger_: LoggerLike = logger.child({ component: 'tec_http_client' })) {
+        this.logger = logger_;
         this.jar = new CookieJar();
 
         this.client = wrapper(axios.create({

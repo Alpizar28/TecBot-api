@@ -110,7 +110,7 @@ Read it end to end before touching code; it is the canonical agreement for agent
 
 ## HTTP & Scheduler Patterns
 
-- Cron expressions default to the `CRON_SCHEDULE` env var; validate with `cron.validate` before scheduling (follow `apps/core/src/index.ts`).
+- Orchestration runs on a continuous `setTimeout` loop with exponential backoff on failure (`CYCLE_INTERVAL_MS`, `BASE_CYCLE_BACKOFF_MS`, `MAX_CYCLE_BACKOFF_MS` env vars).
 - Long-running jobs should log start/end markers and include counters (processed notifications, failures, retries).
 - Fastify schemas (zod-free) currently use JSON schema objects; extend them rather than switching libraries mid-file.
 - For sequential scraping, follow the `SessionManager` flow: create/get client, reuse cookies, handle invalid session by re-login.
@@ -137,17 +137,17 @@ Read it end to end before touching code; it is the canonical agreement for agent
 ## Operational Tips & Alerts
 
 - Prefer `docker logs -f tec-brain-core` / `tec-brain-scraper` for runtime debugging instead of sprinkling console prints.
-- Check Fastify `/health` endpoints (ports 3001/3002) before triggering manual jobs to avoid cascading failures.
+- Check Fastify `/health` endpoint (port 3002) before triggering manual jobs to avoid cascading failures.
 - Use `/api/run-now` for manual orchestration triggers; pair it with log tailing to confirm completion.
-- Keep `CRON_SCHEDULE` realistic for TEC Digital rate limits; 5-minute cadence is the default safe value.
+- Keep `CYCLE_INTERVAL_MS` realistic for TEC Digital rate limits; 300000 (5 min) is the default safe value.
 - Configure `SESSION_DIR` on SSD-backed storage when running inside containers to prevent slow cookie jar writes.
 - Always store Drive OAuth files outside the repo and mount them through env-driven paths such as `GOOGLE_OAUTH_CLIENT_PATH`.
-- When replaying downloads, rely on `/download-file` so that cookies remain encapsulated in the scraper process.
+- File downloads now go through the in-process `downloadTecFile` function (scraper merged into core).
 - Telegram fallbacks remain the source of truth for documents until Drive uploads succeed; do not delete fallback logic.
 - Drive tokens vencen con frecuencia: si Google responde `invalid_grant`, el dispatcher avisa al usuario vía Telegram (cooldown 12h) para que ejecute `/actualizar`; mantén ese flujo activo al tocar la integración.
-- Core keeps operational state in-process (the `running` overlap guard, `endpointMetrics`, per-cycle `dispatchCounters`, admin-alert cooldowns, and the scraper's `NEWS_CACHE`). This assumes a single `core` replica; running more than one breaks these guarantees. Move such state to Postgres/Redis before scaling horizontally.
+- Core keeps operational state in-process (the `running` overlap guard, per-cycle `dispatchCounters`, admin-alert cooldowns, and the scraper module's `NEWS_CACHE`). This assumes a single `core` replica; running more than one breaks these guarantees. Move such state to Postgres/Redis before scaling horizontally.
 - Admin cycle alerts are deduplicated per alert kind with a cooldown (`ADMIN_ALERT_COOLDOWN_MINUTES`, default 60) so a persistent failure does not spam Telegram every cycle.
-- `INTERNAL_API_SECRET` (core) and `SCRAPER_SECRET` (scraper) are mandatory outside `NODE_ENV=development`; the services refuse to boot without them. The `dev` scripts set `NODE_ENV=development` for local runs.
+- `INTERNAL_API_SECRET` is mandatory outside `NODE_ENV=development`; core refuses to boot without it. The `dev` script sets `NODE_ENV=development` for local runs.
 - Prefer environment toggles over ad-hoc feature flags; document any new toggle in `.env.example`.
 - When adding monitoring, expose metrics through Fastify routes or logs rather than introducing new dependencies mid-stack.
 - Before cutting a release, rerun migrations and re-encryption helpers locally to ensure drift-free deployments.

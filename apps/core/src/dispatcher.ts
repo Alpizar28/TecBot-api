@@ -17,6 +17,7 @@ import { DriveService, OneDriveService } from '@tec-brain/drive';
 import type { User, RawNotification } from '@tec-brain/types';
 import { logger } from './logger.js';
 import { forwardNotification, type FileDownloader } from './studyos.js';
+import { downloadTecFile } from './scraper/index.js';
 
 interface LoggerLike {
   info: (...args: unknown[]) => void;
@@ -64,7 +65,6 @@ async function resolveCourseNameForDrive(course: string, link?: string): Promise
 export async function dispatch(
   user: User,
   notification: RawNotification,
-  scraperUrl: string,
   tecPassword: string,
   telegram: TelegramService,
   storage: DriveService | OneDriveService | null,
@@ -158,7 +158,6 @@ export async function dispatch(
         processed = await handleDocumentNotification(
           user,
           notification,
-          scraperUrl,
           tecPassword,
           telegram,
           storage,
@@ -182,19 +181,9 @@ export async function dispatch(
     }
     if (!exists || shouldRetryDocument) {
       const downloader: FileDownloader = async (downloadUrl) => {
-        const scraperSecret = process.env.SCRAPER_SECRET;
-        const res = await axios.post<ArrayBuffer>(
-          `${scraperUrl}/download-file`,
-          { username: user.tec_username, password: tecPassword, downloadUrl },
-          {
-            responseType: 'arraybuffer',
-            timeout: 60_000,
-            headers: scraperSecret ? { 'x-scraper-secret': scraperSecret } : {},
-          },
-        );
-        const contentType =
-          (res.headers['content-type'] as string | undefined) ?? 'application/octet-stream';
-        return { data: res.data, contentType };
+        const result = await downloadTecFile(user.tec_username, tecPassword, downloadUrl);
+        if (!result) throw new Error('Failed to download file');
+        return result;
       };
       await forwardNotification(user, notification, downloader);
     }
@@ -213,7 +202,6 @@ export async function dispatch(
 async function handleDocumentNotification(
   user: User,
   notification: RawNotification,
-  scraperUrl: string,
   tecPassword: string,
   telegram: TelegramService,
   storage: DriveService | OneDriveService | null,
@@ -266,18 +254,9 @@ async function handleDocumentNotification(
         );
 
         const downloader = async () => {
-          const res = await axios.post<ArrayBuffer>(
-            `${scraperUrl}/download-file`,
-            {
-              username: user.tec_username,
-              password: tecPassword,
-              downloadUrl: file.download_url,
-            },
-            { responseType: 'arraybuffer', timeout: 60_000 },
-          );
-          const contentType =
-            (res.headers['content-type'] as string | undefined) ?? 'application/octet-stream';
-          return { data: res.data, contentType };
+          const result = await downloadTecFile(user.tec_username, tecPassword, file.download_url);
+          if (!result) throw new Error('Failed to download file');
+          return result;
         };
 
         const { fileId, webUrl } = await storage.downloadAndUpload(

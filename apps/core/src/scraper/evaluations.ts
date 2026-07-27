@@ -1,17 +1,6 @@
-/**
- * Evaluations extractor: scrapes the per-course "Evaluaciones" rubric
- * (tda-ce-estudiante/tda-index) that never surfaces in the notifications
- * feed. One GET per course returns everything pre-rendered: categories,
- * assignments, weights, grades, due dates and the statement PDF links.
- *
- * Course discovery: the /dotlrn/ portal lists every enrolled course (all
- * terms); we keep only the most recent term — max (year, term number) from
- * the community key, e.g. "S-1-2026.CA.EL2114.2" — so when S-2 courses
- * appear the S-1 ones of the same year drop out of the sweep.
- */
 import crypto from 'crypto';
 import * as cheerio from 'cheerio';
-import type { TecHttpClient } from '../clients/tec-http.client.js';
+import type { TecHttpClient } from './tec-http.client.js';
 import { logger } from '../logger.js';
 
 const extractorLogger = logger.child({ component: 'evaluations_extractor' });
@@ -19,17 +8,11 @@ const extractorLogger = logger.child({ component: 'evaluations_extractor' });
 const TEC_BASE = 'https://tecdigital.tec.ac.cr';
 
 export interface CourseRef {
-  /** e.g. "EL2114" */
   code: string;
-  /** e.g. "S-1-2026.CA.EL2114.2" — unique per course+group+term */
   community_key: string;
-  /** Human name as shown in the portal, e.g. "Cálculo superior GR 1" */
   name: string;
-  /** Absolute URL to the course root, e.g. https://.../dotlrn/classes/MA/MA2104/S-1-2026.CA.MA2104.1/ */
   url: string;
-  /** Term year parsed from the community key (used for current-term filter) */
   year: number;
-  /** Term number within the year (S-1 vs S-2), tiebreaker of the filter */
   term: number;
 }
 
@@ -40,28 +23,19 @@ export interface EvaluationFile {
 }
 
 export interface CourseEvaluation {
-  /** Stable id: eval_<sha256(community_key|category|title)[:16]> */
   external_id: string;
   category: string;
-  /** Category weight over the course total, e.g. 80 (from item_weight) */
   category_weight: number | null;
   title: string;
-  /** Points obtained toward the course total (null while ungraded) */
   score: number | null;
-  /** Max points toward the course total */
   max_score: number | null;
-  /** "Ponderado" assignments report a 0-100 weighted grade instead */
   weighted_score: number | null;
-  /** From "Nota obtenida: 80.3 / 100" in Mis entregas (null if absent) */
   grade_over_100: number | null;
   description: string;
-  /** ISO date YYYY-MM-DD ("" when "Fecha no definida") */
   due_date: string;
-  /** HH:MM ("" when no due date) */
   due_time: string;
   late_allowed: boolean;
   comments: string;
-  /** Statement PDFs attached to the assignment description */
   files: EvaluationFile[];
 }
 
@@ -69,11 +43,9 @@ export interface CourseEvaluations extends CourseRef {
   evaluations: CourseEvaluation[];
 }
 
-/** Community key segment, e.g. "S-1-2026.CA.EL2114.2" (also V-/H- terms). */
 const COMMUNITY_RE = /^([SVH])-(\d)-(\d{4})\./;
 const COURSE_HREF_RE = /^\/dotlrn\/classes\/[^/]+\/([A-Z]{2,4}\d{3,4})\/([^/]+)\/?$/i;
 
-/** Parses the /dotlrn/ portal HTML into the current-term course list. */
 export function parseCourseLinks(html: string): CourseRef[] {
   const $ = cheerio.load(html);
   const byKey = new Map<string, CourseRef>();
@@ -81,14 +53,14 @@ export function parseCourseLinks(html: string): CourseRef[] {
   $('a[href*="/dotlrn/classes/"]').each((_, el) => {
     const href = ($(el).attr('href') ?? '').trim().replace(/\/+$/, '/');
     const match = href.match(COURSE_HREF_RE);
-    if (!match) return; // subgroup or deep link — not a course root
+    if (!match) return;
     const [, code, communityKey] = match;
     const term = communityKey.match(COMMUNITY_RE);
     if (!term) return;
 
     const name = $(el)
       .text()
-      .replace(/\bbeenhere\b/g, '') // material-icons ligature leaks into text
+      .replace(/\bbeenhere\b/g, '')
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -118,7 +90,6 @@ function parseScorePair(text: string): { score: number | null; max: number | nul
   return { score, max: parseFloat(m[2].replace(',', '.')) };
 }
 
-/** "20/03/2026 08:00" → {date: "2026-03-20", time: "08:00"}; anything else → empty. */
 export function parseDueDate(text: string): { date: string; time: string } {
   const m = text.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}:\d{2}))?/);
   if (!m) return { date: '', time: '' };
@@ -144,12 +115,6 @@ export function buildEvaluationExternalId(
 
 type Node = ReturnType<cheerio.CheerioAPI>;
 
-/**
- * TEC stores assignment descriptions as HTML that arrives double-escaped
- * ("&lt;p>Como parte de la incorporaci&amp;oacute;n..."). One decode pass
- * turns it into HTML, a second parse strips the tags and decodes the
- * remaining entities.
- */
 function decodeRichText(text: string): string {
   if (!/[&][a-z#]+;|&lt;|&amp;/i.test(text)) return text;
   const decodedOnce = cheerio.load(`<div>${text}</div>`)('div').text();
@@ -157,7 +122,6 @@ function decodeRichText(text: string): string {
   return plain.replace(/\s+/g, ' ').trim();
 }
 
-/** Reads the value node that follows a `p.title_subsection` label matching `labelRe`. */
 function detailValue($: cheerio.CheerioAPI, block: Node, labelRe: RegExp): Node | null {
   let found: Node | null = null;
   block.find('p.title_subsection').each((_, el) => {
@@ -183,7 +147,6 @@ function radioIsYes($: cheerio.CheerioAPI, value: Node | null): boolean {
   return yes;
 }
 
-/** Parses one course's tda-index HTML into structured evaluations. */
 export function parseEvaluationsPage(html: string, courseUrl: string): CourseEvaluation[] {
   const $ = cheerio.load(html);
   const results: CourseEvaluation[] = [];
@@ -192,7 +155,6 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
   let category = '';
   let categoryWeight: number | null = null;
 
-  // Categories and assignment blocks appear interleaved in document order.
   $('.title_acor_grade, .ccontent_assign').each((_, el) => {
     const node = $(el);
 
@@ -206,7 +168,6 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
     const title = node.find('.assignNameText').first().text().replace(/\s+/g, ' ').trim();
     if (!title) return;
 
-    // Grade in the header: either "27.30 / 34.00" or a "Ponderado 100.0" widget.
     const gradeEl = node.find('.vt_grade_student').first();
     const weightedText = gradeEl.find('.gradeW').first().text().trim();
     const weightedScore = weightedText ? parseFloat(weightedText.replace(',', '.')) : null;
@@ -232,7 +193,6 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
       detailValue($, node, /después de fecha límite/),
     );
 
-    // "Mis entregas" right column: published grade over 100 + comments.
     let gradeOver100: number | null = null;
     let comments = '';
     node.find('p.title_subsection').each((_, label) => {
@@ -246,10 +206,6 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
       }
     });
 
-    // Statement attachments live ONLY in the "Descripción" block as
-    // href="../../evaluation/view/<name>.pdf?revision_id=N". Everything else
-    // under /evaluation/view/ is per-student (submissions, feedback files)
-    // and must not reach StudyOS.
     const files: EvaluationFile[] = [];
     const seen = new Set<string>();
     const descriptionBlock = node
@@ -293,7 +249,6 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
   return results;
 }
 
-/** Resolves "../../evaluation/view/x.pdf?rev" (or variants) against the course root. */
 export function resolveEvaluationUrl(href: string, courseUrl: string): string {
   const trimmed = href.trim();
   if (!trimmed) return '';
@@ -304,7 +259,6 @@ export function resolveEvaluationUrl(href: string, courseUrl: string): string {
   return `${base}${trimmed.slice(viewIdx)}`;
 }
 
-/** Fetches the portal + every current-term course rubric. Never throws per-course. */
 export async function scrapeEvaluations(client: TecHttpClient): Promise<CourseEvaluations[]> {
   const portal = await client.client.get<string>(`${TEC_BASE}/dotlrn/`, { timeout: 30_000 });
   const courses = parseCourseLinks(String(portal.data ?? ''));

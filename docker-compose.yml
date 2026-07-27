@@ -26,38 +26,6 @@ services:
 
   # ─── Services ────────────────────────────────────────────────────────────────
 
-  scraper:
-    build:
-      context: .
-      dockerfile: apps/scraper/Dockerfile
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 300M
-        reservations:
-          memory: 100M
-    environment:
-      PORT: '3001'
-      SCRAPER_SECRET: '${SCRAPER_SECRET}'
-      # Must match the volume mount below — without it the scraper writes to a
-      # relative ./data/sessions and hits EACCES (see NEXT_STEPS.md).
-      SESSION_DIR: /app/data/sessions
-    volumes:
-      - sessions_data:/app/data/sessions
-    healthcheck:
-      test:
-        [
-          'CMD',
-          'node',
-          '-e',
-          "fetch('http://localhost:3001/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
   core:
     build:
       context: .
@@ -71,22 +39,20 @@ services:
           memory: 100M
     environment:
       PORT: '3002'
-      SCRAPER_URL: 'http://scraper:3001'
+      SESSION_DIR: /app/data/sessions
       DATABASE_URL: 'postgresql://tecbrain:${POSTGRES_PASSWORD}@db:5432/tecbrain'
       DB_ENCRYPTION_KEY: '${DB_ENCRYPTION_KEY}'
       TELEGRAM_BOT_TOKEN: '${TELEGRAM_BOT_TOKEN}'
       GOOGLE_OAUTH_CLIENT_PATH: '/app/data/credentials/oauth_client.json'
       DRIVE_ROOT_FOLDER_ID: '${DRIVE_ROOT_FOLDER_ID}'
-      CRON_SCHEDULE: '${CRON_SCHEDULE}'
+      CYCLE_INTERVAL_MS: '${CYCLE_INTERVAL_MS}'
       CORE_CONCURRENCY: '${CORE_CONCURRENCY}'
       INTERNAL_API_SECRET: '${INTERNAL_API_SECRET}'
-      SCRAPER_SECRET: '${SCRAPER_SECRET}'
     volumes:
       - credentials_data:/app/data/credentials:ro
+      - sessions_data:/app/data/sessions
     depends_on:
       db:
-        condition: service_healthy
-      scraper:
         condition: service_healthy
     healthcheck:
       test:

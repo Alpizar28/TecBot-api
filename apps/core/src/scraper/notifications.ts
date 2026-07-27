@@ -2,32 +2,20 @@ import crypto from 'crypto';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import type { RawNotification } from '@tec-brain/types';
-import { TecHttpClient } from '../clients/tec-http.client.js';
+import { TecHttpClient } from './tec-http.client.js';
 import { logger } from '../logger.js';
 
 interface TecNotificationItem {
-  /** Real TEC notification ID — used for the delete endpoint */
   notification_id?: string;
-  /** Legacy field name — kept for backward compat */
   id?: string;
   text?: string;
-  /** Course / community name as returned by TEC */
   title?: string;
   type_hint?: string;
   url?: string;
-  /** TEC-formatted date string, e.g. "02-03-2026 08:53AM" */
   creation_date?: string;
-  /** Legacy field name */
   date_text?: string;
   state?: string;
   category_id?: number;
-}
-
-interface InternalDispatchResponse {
-  status: 'success' | 'error';
-  processed?: boolean;
-  reason?: string;
-  error?: string;
 }
 
 const extractorLogger = logger.child({ component: 'notifications_extractor' });
@@ -47,10 +35,8 @@ type MetricStore = Record<string, EndpointMetric>;
 export async function processNotificationsSequentially(
   client: TecHttpClient,
   userId: string,
-  dispatchUrl: string,
-  cookies: { name: string; value: string; domain?: string; path?: string }[],
+  onNotification: (notification: RawNotification) => Promise<{ processed: boolean; reason: string }>,
   keywords: string[] = [],
-  dispatchSecret: string = '',
 ): Promise<'ok' | 'invalid_session'> {
   const metrics: MetricStore = {};
   let result: 'ok' | 'invalid_session' = 'ok';
@@ -118,28 +104,8 @@ export async function processNotificationsSequentially(
           continue;
         }
 
-        const response = await requestWithRetry(
-          () =>
-            axios.post<InternalDispatchResponse>(
-              dispatchUrl,
-              {
-                userId,
-                notification: parsed,
-                cookies,
-              },
-              {
-                timeout: 120_000,
-                headers: dispatchSecret ? { 'x-internal-secret': dispatchSecret } : {},
-              },
-            ),
-          {
-            endpoint: 'core.internal_dispatch',
-            metrics,
-            logger: extractorLogger,
-          },
-        );
+        const dispatchResult = await onNotification(parsed);
 
-        const dispatchResult = response.data;
         extractorLogger.debug(
           { userId, externalId: parsed.external_id, reason: dispatchResult?.reason },
           'Notification dispatched',
@@ -160,21 +126,6 @@ export async function processNotificationsSequentially(
   return result;
 }
 
-/**
- * Builds a stable external_id for a notification.
- *
- * Priority:
- * 1. If TEC provides a numeric `notification_id` / `id`, use `notif_<id>`.
- *    This is the only truly stable identifier across scrape cycles.
- * 2. Otherwise, produce a deterministic 16-char hex fingerprint from the
- *    notification's link and full text using SHA-256.  This guarantees the
- *    same notification always yields the same id, regardless of cycle timing
- *    or minor whitespace differences in the surrounding wrapper.
- *
- * The old djb2 `hashString` helper was a 32-bit hash with overflow issues
- * that could produce different results for the same input under JS engine
- * optimizations, and had a high collision probability for short inputs.
- */
 export function buildExternalId(
   tecId: string | number | undefined | null,
   link: string,
@@ -193,12 +144,10 @@ async function normalizeNotification(
   const text = (item.text ?? '').trim();
   const link = item.url ?? '';
   const type = classifyType(item.type_hint ?? '', text, link);
-  // Try to extract a better name from text if available
   const extractedCourse = extractCourse(text, link);
 
   let course = item.title ? item.title.trim() : extractedCourse;
 
-  // If TEC returned just a short code for the title, but our heuristic extracted a full name, prefer the full name.
   if (
     course.match(/^[A-Z]{2,4}\d{3,4}$/i) &&
     extractedCourse !== 'Curso Desconocido' &&
@@ -206,9 +155,7 @@ async function normalizeNotification(
   ) {
     course = extractedCourse;
   }
-  // Prefer `notification_id`; fall back to legacy `id`
   const tecId = item.notification_id ?? item.id;
-  // Parse TEC date format "DD-MM-YYYY HH:MMam/pm" → "YYYY-MM-DD"
   const date =
     parseTecDate(item.creation_date) ?? item.date_text ?? new Date().toISOString().slice(0, 10);
 
@@ -231,11 +178,6 @@ async function normalizeNotification(
     }
   }
 
-  // When TEC provides a numeric notification_id, use it directly — it's the
-  // only truly stable identifier across scrape cycles.
-  // Fallback: build a deterministic SHA-256 fingerprint from the link (most
-  // stable) and the full text.  Using crypto.createHash avoids hash collisions
-  // and guarantees the same notification always produces the same external_id.
   const external_id = buildExternalId(tecId, link, text);
 
   return {
@@ -252,13 +194,8 @@ async function normalizeNotification(
   };
 }
 
-/**
- * Parses TEC Digital date strings like "02-03-2026 08:53AM" → "2026-03-02".
- * Returns null if the format is unrecognised.
- */
 function parseTecDate(raw?: string): string | null {
   if (!raw) return null;
-  // Format: DD-MM-YYYY HH:MMam/pm
   const match = raw.match(/^(\d{2})-(\d{2})-(\d{4})/);
   if (!match) return null;
   const [, dd, mm, yyyy] = match;
@@ -279,24 +216,20 @@ function isGenericNewsText(text: string): boolean {
 interface NewsContent {
   title: string;
   body: string;
-  /** Absolute URL to the specific news item page */
   itemUrl: string;
 }
 
-// ─── In-memory news cache ─────────────────────────────────────────────────────
-// Key: news list URL (e.g. /dotlrn/classes/.../news/). TTL: 2 hours.
 interface NewsCacheEntry {
   content: NewsContent;
   expiresAt: number;
 }
 const NEWS_CACHE = new Map<string, NewsCacheEntry>();
-const NEWS_CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+const NEWS_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 
 async function resolveNewsContent(
   client: TecHttpClient,
   newsLink: string,
 ): Promise<NewsContent | null> {
-  // Check cache first
   const cached = NEWS_CACHE.get(newsLink);
   if (cached && cached.expiresAt > Date.now()) {
     extractorLogger.debug({ source: newsLink }, 'News content served from cache');
@@ -310,7 +243,6 @@ async function resolveNewsContent(
     const listRes = await client.client.get<string>(listUrl, { timeout: 15_000 });
     const $list = cheerio.load(String(listRes.data ?? ''));
 
-    // First <a href="item?item_id=..."> inside the list table
     const itemHref = $list('table.list-table a[href*="item?item_id="]').first().attr('href');
     if (!itemHref) {
       extractorLogger.debug({ url: listUrl }, 'No news item link found in list page');
@@ -344,7 +276,6 @@ async function resolveNewsContent(
       'Resolved news content',
     );
 
-    // Store in cache
     NEWS_CACHE.set(newsLink, { content, expiresAt: Date.now() + NEWS_CACHE_TTL_MS });
 
     return content;
@@ -393,8 +324,6 @@ async function resolveDocumentFiles(
       });
 
       if (folderRes.status === 200) {
-        // The new endpoint returns an object with an "elements" array.
-        // normalizeFolderResponse expects an array, so if it's an object with "elements", pass that.
         const elements =
           folderRes.data && Array.isArray(folderRes.data.elements)
             ? folderRes.data.elements
@@ -404,7 +333,6 @@ async function resolveDocumentFiles(
           const kind = String(fileItem.type ?? fileItem.fs_type ?? '').toLowerCase();
           const fileId = fileItem.file_id;
           const objectId = fileItem.object_id;
-          // Usually we only want files, not subfolders. But subfolders might be typed as 'folder' in fs_type.
           if (
             kind &&
             kind !== 'file' &&
@@ -543,8 +471,6 @@ async function requestWithRetry<T>(request: () => Promise<T>, context: RetryCont
   throw new Error(`Retry loop exhausted for ${context.endpoint}`);
 }
 
-// Transient low-level network conditions worth retrying when there is no HTTP
-// response (connection reset, timeout, transient DNS failure).
 const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNRESET',
   'ETIMEDOUT',
@@ -554,10 +480,9 @@ const TRANSIENT_NETWORK_CODES = new Set([
 ]);
 
 function isRetryableHttpError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) return false; // unknown bug (e.g. TypeError): do not retry
+  if (!axios.isAxiosError(error)) return false;
   const status = error.response?.status;
   if (status === undefined) {
-    // No HTTP response — retry only known transient network errors.
     return error.code !== undefined && TRANSIENT_NETWORK_CODES.has(error.code);
   }
   return status >= 500 || status === 408 || status === 429;
@@ -637,7 +562,6 @@ export function classifyType(
 export function extractCourse(text: string, link?: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
 
-  // 1. If no text, we have no choice but to fallback to URL code
   if (!normalized) {
     if (link) {
       const urlCourseCode = link.match(
@@ -648,35 +572,28 @@ export function extractCourse(text: string, link?: string): string {
     return 'Curso Desconocido';
   }
 
-  // 2. Try to extract explicit label
   const labeled = normalized.match(/(?:curso|course)\s*:\s*([^|]{4,80})/i);
   if (labeled?.[1]) return cleanCourseCandidate(labeled[1]);
 
-  // 3. Try to extract name before a common separator
   const separators = [' - ', ' – ', ': ', ' | '];
   for (const separator of separators) {
     const idx = normalized.indexOf(separator);
     if (idx > 0) {
       const candidate = cleanCourseCandidate(normalized.slice(0, idx));
-      // Only accept if it's longer than 4 chars AND not just a code
       if (candidate.length >= 4 && !/^[A-Z]{2,4}\d{3,4}$/.test(candidate)) {
         return candidate;
       }
     }
   }
 
-  // 4. At this point, try to get the code from URL as a fallback,
-  // since the text might be too dirty or just a description
   if (link) {
     const urlCourseCode = link.match(/\/dotlrn\/classes\/(?:[^/]+\/)?([A-Z]{2,4}\d{3,4})(?:\/|$)/i);
     if (urlCourseCode?.[1]) return urlCourseCode[1].toUpperCase();
   }
 
-  // 5. Try to extract a code directly from text
   const courseCode = normalized.match(/\b([A-Z]{2,4}\d{3,4})\b/);
   if (courseCode?.[1]) return courseCode[1];
 
-  // 6. Complete fallback to first 80 chars
   return cleanCourseCandidate(normalized.slice(0, 80));
 }
 
@@ -720,8 +637,6 @@ function buildDownloadUrl(
   objectId: unknown,
   fileName: string,
 ): string {
-  // TEC Digital requires version_id (= live_revision) for the download endpoint.
-  // ?object_id= and ?file_id= both return HTTP 422/403.
   if (
     (typeof versionId === 'number' || typeof versionId === 'string') &&
     String(versionId) !== ''

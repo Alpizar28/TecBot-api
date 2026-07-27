@@ -5,7 +5,6 @@
     "description": "Segundo Cerebro TEC — Professional Backend Monorepo",
     "scripts": {
         "build": "pnpm -r build",
-        "dev:scraper": "pnpm --filter @tec-brain/scraper dev",
         "dev:core": "pnpm --filter @tec-brain/core dev",
         "lint": "eslint 'apps/**/*.ts' 'packages/**/*.ts'",
         "format": "prettier --write '**/*.{ts,json,yaml,md}'",

@@ -62,7 +62,6 @@ describe('dispatch()', () => {
     const result = await dispatch(
       user,
       notification,
-      'http://scraper',
       'password',
       {
         sendNotice: vi.fn(),
@@ -84,7 +83,6 @@ describe('dispatch()', () => {
     const result = await dispatch(
       user,
       notification,
-      'http://scraper',
       'password',
       {
         sendNotice: vi.fn().mockRejectedValue(new Error('telegram down')),
@@ -136,7 +134,7 @@ describe('dispatch()', () => {
     } as any;
 
     const { dispatch } = await import('../src/dispatcher.js');
-    await dispatch(userWithDrive, docNotification, 'http://scraper', '', telegram, drive);
+    await dispatch(userWithDrive, docNotification, '', telegram, drive);
 
     expect(telegram.sendDriveAuthExpired).toHaveBeenCalledTimes(1);
   });
@@ -184,7 +182,6 @@ describe('dispatch()', () => {
     const result = await dispatch(
       userWithDrive,
       docNotification,
-      'http://scraper',
       '',
       telegram,
       drive,
@@ -230,7 +227,7 @@ describe('dispatch()', () => {
     } as any;
 
     const { dispatch } = await import('../src/dispatcher.js');
-    await dispatch(user, docNotification, 'http://scraper', '', telegram, null);
+    await dispatch(user, docNotification, '', telegram, null);
 
     expect(db.insertUploadedFile).toHaveBeenCalledWith(
       user.id,
@@ -251,7 +248,6 @@ describe('dispatch()', () => {
     const result = await dispatch(
       user,
       notification,
-      'http://scraper',
       'password',
       {
         sendNotice,

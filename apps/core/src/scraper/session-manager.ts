@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { TecHttpClient } from '../clients/tec-http.client.js';
-import { logger as appLogger } from '../logger.js';
+import { TecHttpClient } from './tec-http.client.js';
+import { logger } from '../logger.js';
 
 const SESSION_MAX_AGE_HOURS = (() => {
   const parsed = Number.parseInt(process.env.SESSION_MAX_AGE_HOURS ?? '12', 10);
@@ -40,20 +40,16 @@ interface LoadedSessionData {
   refreshedAt: number | null;
 }
 
-/**
- * Manages HTTP clients per user.
- * Sessions are persisted to disk in `sessionDir/{username}.json`.
- */
 export class SessionManager {
   private readonly sessionDir: string;
   private readonly logger: LoggerLike;
 
   constructor(
     sessionDir: string,
-    logger: LoggerLike = appLogger.child({ component: 'session_manager' }),
+    logger_: LoggerLike = logger.child({ component: 'session_manager' }),
   ) {
     this.sessionDir = sessionDir;
-    this.logger = logger;
+    this.logger = logger_;
     fs.mkdirSync(sessionDir, { recursive: true });
   }
 
@@ -91,27 +87,26 @@ export class SessionManager {
 
   private normalizePersistedSession(
     value: unknown,
-    sessionPath: string,
+    sessionPath_: string,
     username: string,
   ): LoadedSessionData | null {
     if (Array.isArray(value)) {
       const cookies = value.filter(isStoredCookie);
       if (cookies.length === 0) {
-        this.quarantineBrokenSessionFile(sessionPath, username, 'session has no valid cookies');
+        this.quarantineBrokenSessionFile(sessionPath_, username, 'session has no valid cookies');
         return null;
       }
-      // Legacy format without metadata → force a relogin.
       return { cookies, refreshedAt: null };
     }
 
     if (!isPersistedSessionFile(value)) {
-      this.quarantineBrokenSessionFile(sessionPath, username, 'session file has unknown format');
+      this.quarantineBrokenSessionFile(sessionPath_, username, 'session file has unknown format');
       return null;
     }
 
     const cookies = value.cookies.filter(isStoredCookie);
     if (cookies.length === 0) {
-      this.quarantineBrokenSessionFile(sessionPath, username, 'session has no valid cookies');
+      this.quarantineBrokenSessionFile(sessionPath_, username, 'session has no valid cookies');
       return null;
     }
 
@@ -131,10 +126,6 @@ export class SessionManager {
     fs.writeFileSync(this.sessionPath(username), JSON.stringify(payload, null, 2));
   }
 
-  /**
-   * Returns an authenticated HTTP client.
-   * Tries to restore from disk first. Falls back to fresh login.
-   */
   async getClient(username: string, password: string): Promise<TecHttpClient> {
     const client = new TecHttpClient(buildChildLogger(this.logger, { username }));
 
@@ -205,16 +196,6 @@ export class SessionManager {
 
     this.logger.info({ username }, 'API login successful and session persisted');
   }
-
-  async getCookies(client: TecHttpClient): Promise<any[]> {
-    const raw = await client.jar.getCookies('https://tecdigital.tec.ac.cr/');
-    return raw.map((c) => ({
-      name: c.key,
-      value: c.value,
-      domain: c.domain ?? undefined,
-      path: c.path ?? undefined,
-    }));
-  }
 }
 
 function isExpired(expires?: string): boolean {
@@ -231,15 +212,15 @@ function isStoredCookie(value: unknown): value is StoredCookie {
   return typeof maybeCookie.key === 'string' && typeof maybeCookie.value === 'string';
 }
 
-function buildChildLogger(logger: LoggerLike, bindings: Record<string, unknown>): LoggerLike {
-  const loggerWithChild = logger as LoggerLike & {
+function buildChildLogger(logger_: LoggerLike, bindings: Record<string, unknown>): LoggerLike {
+  const loggerWithChild = logger_ as LoggerLike & {
     child?: (value: Record<string, unknown>) => LoggerLike;
   };
   const maybeChild = loggerWithChild.child;
   if (typeof maybeChild === 'function') {
     return maybeChild.call(loggerWithChild, bindings);
   }
-  return logger;
+  return logger_;
 }
 
 function isPersistedSessionFile(value: unknown): value is PersistedSessionFile {
