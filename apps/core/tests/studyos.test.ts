@@ -92,6 +92,24 @@ describe('buildItemPayload()', () => {
     });
   });
 
+  it('extracts the TEC Digital course context from a class URL', async () => {
+    const { buildItemPayload } = await import('../src/studyos.js');
+    const p = buildItemPayload(
+      {
+        ...notification,
+        course: 'Circuitos en Corriente Alterna',
+        link: 'https://tecdigital.tec.ac.cr/dotlrn/classes/2026/EL2207/S-2-2026.CA.EL2207.2/news/item',
+      },
+      'name:circuitos en corriente alterna',
+    );
+    expect(p.course).toEqual({
+      key: 'code:EL2207',
+      code: 'EL2207',
+      name: 'Circuitos en Corriente Alterna',
+      community_key: 'S-2-2026.CA.EL2207.2',
+    });
+  });
+
   it('prefers resolved_link and maps file references', async () => {
     const { buildItemPayload } = await import('../src/studyos.js');
     const p = buildItemPayload(
@@ -150,11 +168,9 @@ describe('forwardNotification()', () => {
 
     const { forwardNotification } = await import('../src/studyos.js');
     await forwardNotification(baseUser, notification);
-    expect(db.recordStudyosFailure).toHaveBeenCalledWith(
-      'row-1',
-      expect.stringContaining('422'),
-      { permanent: true },
-    );
+    expect(db.recordStudyosFailure).toHaveBeenCalledWith('row-1', expect.stringContaining('422'), {
+      permanent: true,
+    });
     expect(db.insertErrorLog).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'studyos_forward_permanent' }),
     );

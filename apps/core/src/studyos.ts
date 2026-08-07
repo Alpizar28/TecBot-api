@@ -20,6 +20,18 @@ import type { User, RawNotification, FileReference } from '@tec-brain/types';
 import { logger } from './logger.js';
 
 const REQUEST_TIMEOUT_MS = 30_000;
+const COURSE_URL_RE = /\/dotlrn\/classes\/[^\/?#]+\/([A-Z]{2,4}\d{3,4})\/([^\/?#]+)(?:[\/?#]|$)/i;
+
+function courseFromTecUrl(...urls: Array<string | null | undefined>): {
+  code: string;
+  communityKey: string;
+} {
+  for (const url of urls) {
+    const match = (url ?? '').match(COURSE_URL_RE);
+    if (match) return { code: match[1].toUpperCase(), communityKey: decodeURIComponent(match[2]) };
+  }
+  return { code: '', communityKey: '' };
+}
 
 export interface StudyosTarget {
   url: string;
@@ -90,12 +102,20 @@ export function buildItemPayload(
   courseKey: string,
   detectedAt = new Date().toISOString(),
 ): StudyosItemPayload {
-  const code = courseKey.startsWith('code:') ? courseKey.slice(5).toUpperCase() : '';
+  const urlCourse = courseFromTecUrl(n.resolved_link, n.link);
+  const mappedCode = courseKey.startsWith('code:') ? courseKey.slice(5).toUpperCase() : '';
+  const code = mappedCode || urlCourse.code;
+  const key = mappedCode ? courseKey : code ? 'code:' + code : courseKey;
   return {
     schema_version: 1,
     external_id: n.external_id,
     type: n.type,
-    course: { key: courseKey, code, name: n.course },
+    course: {
+      key,
+      code,
+      name: n.course,
+      ...(urlCourse.communityKey ? { community_key: urlCourse.communityKey } : {}),
+    },
     title: n.title || '',
     body: n.description ?? '',
     link: n.resolved_link ?? n.link ?? '',
@@ -143,7 +163,10 @@ async function studyosFetch(
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new StudyosHttpError(res.status, `StudyOS ${path} -> HTTP ${res.status}: ${body.slice(0, 200)}`);
+    throw new StudyosHttpError(
+      res.status,
+      `StudyOS ${path} -> HTTP ${res.status}: ${body.slice(0, 200)}`,
+    );
   }
   return res;
 }
@@ -185,7 +208,11 @@ export async function postFile(
       source_url: file.source_url ?? '',
     }),
   );
-  form.append('file', new Blob([data], { type: file.mime_type || 'application/pdf' }), file.file_name);
+  form.append(
+    'file',
+    new Blob([data], { type: file.mime_type || 'application/pdf' }),
+    file.file_name,
+  );
   await studyosFetch(target, '/api/sync/files', { method: 'POST', body: form });
 }
 
@@ -368,7 +395,9 @@ export function buildEvaluationItemPayload(
     ev.due_date ? `Fecha de entrega: ${ev.due_date}${ev.due_time ? ` ${ev.due_time}` : ''}` : '',
     gradeLine,
     ev.comments ? `Comentarios: ${ev.comments}` : '',
-    ev.max_score !== null ? `Valor: ${ev.max_score} pts de ${ev.category} (${ev.category_weight ?? '?'}%)` : `Categoría: ${ev.category}`,
+    ev.max_score !== null
+      ? `Valor: ${ev.max_score} pts de ${ev.category} (${ev.category_weight ?? '?'}%)`
+      : `Categoría: ${ev.category}`,
   ].filter(Boolean);
 
   return {
@@ -512,8 +541,7 @@ export interface StudyosAlert {
   };
 }
 
-const escHtml = (s: string) =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 export function formatStudyosAlert(target: StudyosTarget, alert: StudyosAlert): string {
   const p = alert.payload ?? {};
@@ -612,7 +640,10 @@ export async function retryStudyosPending(user: User): Promise<void> {
         action: permanent ? 'studyos_forward_permanent' : 'studyos_forward',
         error_message: message,
       }).catch(() => {});
-      log.warn({ externalId: n.external_id, errorMessage: message, permanent }, 'StudyOS retry failed');
+      log.warn(
+        { externalId: n.external_id, errorMessage: message, permanent },
+        'StudyOS retry failed',
+      );
     }
   }
 }
