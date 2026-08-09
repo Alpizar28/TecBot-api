@@ -295,6 +295,15 @@ function htmlToPlainText(html: string): string {
     .replace(/<\/li>/gi, '\n')
     .replace(/<strong[^>]*>([\s\S]*?)<\/strong>/gi, '*$1*')
     .replace(/<b[^>]*>([\s\S]*?)<\/b>/gi, '*$1*')
+    // Los enlaces se conservan como "texto (URL)": al aplanar el HTML sin
+    // esto, un "Reunión- Unirse | Microsoft Teams" pierde el href y el enlace
+    // de la clase queda irrecuperable aguas abajo.
+    .replace(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, text) => {
+      const label = String(text).replace(/<[^>]+>/g, '').trim();
+      const url = String(href).trim();
+      if (!url || url.startsWith('#') || url.startsWith('javascript:')) return label;
+      return label && label !== url ? `${label} (${url})` : url;
+    })
     .replace(/<[^>]+>/g, '')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
