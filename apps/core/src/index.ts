@@ -129,12 +129,12 @@ async function main() {
   });
 
   fastify.post<{
-    Body: { userId: string; notification: RawNotification; cookies: ScrapeResponse['cookies']; courseId?: string };
+    Body: { userId: string; notification: RawNotification; cookies: ScrapeResponse['cookies'] };
   }>('/api/internal-dispatch', async (request, reply) => {
     if (!requireInternalSecret(request, reply)) return;
     try {
-      const { userId, notification, cookies, courseId = '' } = request.body;
-      const result = await handleInternalDispatch(userId, notification, cookies, courseId);
+      const { userId, notification, cookies } = request.body;
+      const result = await handleInternalDispatch(userId, notification, cookies);
       return { status: 'success', processed: result.processed, reason: result.reason };
     } catch (error) {
       request.log.error(error);
