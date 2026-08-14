@@ -37,6 +37,7 @@ export async function processNotificationsSequentially(
   userId: string,
   onNotification: (notification: RawNotification) => Promise<{ processed: boolean; reason: string }>,
   keywords: string[] = [],
+  courseId = '',
 ): Promise<'ok' | 'invalid_session'> {
   const metrics: MetricStore = {};
   let result: 'ok' | 'invalid_session' = 'ok';
@@ -103,6 +104,7 @@ export async function processNotificationsSequentially(
           );
           continue;
         }
+        if (courseId && !parsed.course.toLowerCase().includes(courseId.toLowerCase()) && !parsed.link.toLowerCase().includes(courseId.toLowerCase())) continue;
 
         const dispatchResult = await onNotification(parsed);
 

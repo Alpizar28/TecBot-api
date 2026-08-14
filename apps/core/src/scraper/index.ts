@@ -44,11 +44,12 @@ export async function processUserNotifications(
   userId: string,
   onNotification: (notification: RawNotification) => Promise<{ processed: boolean; reason: string }>,
   keywords: string[] = [],
+  courseId = '',
 ): Promise<'ok' | 'error'> {
   const client = await safeGetClient(username, password);
   if (!client) return 'error';
 
-  const initialStatus = await processNotifs(client, userId, onNotification, keywords);
+  const initialStatus = await processNotifs(client, userId, onNotification, keywords, courseId);
 
   if (initialStatus === 'invalid_session') {
     logger.warn({ userId }, 'Invalid session detected, re-authenticating');
@@ -60,7 +61,7 @@ export async function processUserNotifications(
       return 'error';
     }
 
-    const retryStatus = await processNotifs(client, userId, onNotification, keywords);
+    const retryStatus = await processNotifs(client, userId, onNotification, keywords, courseId);
     if (retryStatus === 'invalid_session') {
       logger.error({ userId }, 'Session invalid after re-authentication');
       return 'error';

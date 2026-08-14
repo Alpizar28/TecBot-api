@@ -10,6 +10,20 @@ export interface UploadResult {
   webUrl?: string;
 }
 
+export interface DriveSourceFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime: string;
+  webUrl: string;
+}
+
+export interface DownloadedDriveFile {
+  name: string;
+  mimeType: string;
+  content: Buffer;
+}
+
 export interface OAuthClient {
   clientId: string;
   clientSecret: string;
@@ -267,6 +281,75 @@ export class DriveService {
       fileName,
       webUrl: `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`,
     };
+  }
+
+  /** Lists all supported files under a shared folder, including subfolders. */
+  async listFilesRecursively(rootFolderId: string): Promise<DriveSourceFile[]> {
+    const files: DriveSourceFile[] = [];
+    const visitedFolders = new Set<string>();
+
+    const visit = async (folderId: string): Promise<void> => {
+      if (visitedFolders.has(folderId)) return;
+      visitedFolders.add(folderId);
+      let pageToken: string | undefined;
+      do {
+        const response = await this.drive.files.list({
+          q: `'${folderId.replace(/'/g, "\\'")}' in parents and trashed = false`,
+          fields: 'nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink)',
+          pageToken,
+          pageSize: 100,
+          spaces: 'drive',
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
+        });
+        for (const item of response.data.files ?? []) {
+          if (!item.id || !item.name || !item.mimeType) continue;
+          if (item.mimeType === 'application/vnd.google-apps.folder') {
+            await visit(item.id);
+            continue;
+          }
+          files.push({
+            id: item.id,
+            name: item.name,
+            mimeType: item.mimeType,
+            modifiedTime: item.modifiedTime ?? '',
+            webUrl: item.webViewLink ?? `https://drive.google.com/file/d/${encodeURIComponent(item.id)}/view`,
+          });
+        }
+        pageToken = response.data.nextPageToken ?? undefined;
+      } while (pageToken);
+    };
+
+    await visit(rootFolderId);
+    return files;
+  }
+
+  /** Downloads binary files and exports Google Docs, Sheets and Slides as PDF. */
+  async downloadSourceFile(file: DriveSourceFile): Promise<DownloadedDriveFile | null> {
+    const googleMime = file.mimeType;
+    const exportable = new Set([
+      'application/vnd.google-apps.document',
+      'application/vnd.google-apps.spreadsheet',
+      'application/vnd.google-apps.presentation',
+      'application/vnd.google-apps.drawing',
+    ]);
+    if (googleMime.startsWith('application/vnd.google-apps.') && !exportable.has(googleMime)) {
+      return null;
+    }
+    const response = exportable.has(googleMime)
+      ? await this.drive.files.export(
+          { fileId: file.id, mimeType: 'application/pdf' },
+          { responseType: 'arraybuffer' },
+        )
+      : await this.drive.files.get(
+          { fileId: file.id, alt: 'media', supportsAllDrives: true },
+          { responseType: 'arraybuffer' },
+        );
+    const content = Buffer.from(response.data as ArrayBuffer);
+    const name = exportable.has(googleMime) && !file.name.toLowerCase().endsWith('.pdf')
+      ? `${file.name}.pdf`
+      : file.name;
+    return { name, mimeType: exportable.has(googleMime) ? 'application/pdf' : googleMime, content };
   }
 }
 

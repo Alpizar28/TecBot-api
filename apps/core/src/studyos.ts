@@ -17,6 +17,7 @@ import {
   insertErrorLog,
 } from '@tec-brain/database';
 import type { User, RawNotification, FileReference } from '@tec-brain/types';
+import type { DriveSourceFile, DownloadedDriveFile } from '@tec-brain/drive';
 import { logger } from './logger.js';
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -214,6 +215,36 @@ export async function postFile(
     file.file_name,
   );
   await studyosFetch(target, '/api/sync/files', { method: 'POST', body: form });
+}
+
+/** Forwards a file found in a configured shared Drive folder to StudyOS. */
+export async function forwardDriveFile(
+  user: User,
+  courseId: string,
+  source: DriveSourceFile,
+  downloaded: DownloadedDriveFile,
+): Promise<void> {
+  const target = getStudyosTarget(user);
+  if (!target) return;
+  const externalId = `drive:${source.id}`;
+  await postItem(target, {
+    schema_version: 1,
+    external_id: externalId,
+    type: 'documento',
+    course: { key: `code:${courseId.toUpperCase()}`, code: courseId.toUpperCase(), name: courseId },
+    title: downloaded.name,
+    body: 'Material sincronizado desde la carpeta compartida de Google Drive.',
+    link: source.webUrl,
+    published_at: source.modifiedTime,
+    detected_at: new Date().toISOString(),
+    files: [{ file_name: downloaded.name, download_url: source.webUrl, mime_type: downloaded.mimeType }],
+  });
+  await postFile(
+    target,
+    externalId,
+    { file_name: downloaded.name, mime_type: downloaded.mimeType, source_url: source.webUrl },
+    Uint8Array.from(downloaded.content).buffer,
+  );
 }
 
 export type FileDownloader = (

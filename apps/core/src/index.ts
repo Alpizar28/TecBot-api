@@ -118,19 +118,23 @@ async function main() {
   }
 
   // Manual trigger for testing — requires x-internal-secret header
-  fastify.post('/api/run-now', async (request, reply) => {
+  fastify.post<{ Body: { keywords?: string[]; courseId?: string } }>('/api/run-now', async (request, reply) => {
     if (!requireInternalSecret(request, reply)) return;
-    setImmediate(() => void runOrchestrationCycle());
-    return { status: 'triggered' };
+    const keywords = Array.isArray(request.body?.keywords)
+      ? request.body.keywords.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      : [];
+    const courseId = typeof request.body?.courseId === 'string' ? request.body.courseId.trim() : '';
+    setImmediate(() => void runOrchestrationCycle(keywords, courseId));
+    return { status: 'triggered', keywords, courseId };
   });
 
   fastify.post<{
-    Body: { userId: string; notification: RawNotification; cookies: ScrapeResponse['cookies'] };
+    Body: { userId: string; notification: RawNotification; cookies: ScrapeResponse['cookies']; courseId?: string };
   }>('/api/internal-dispatch', async (request, reply) => {
     if (!requireInternalSecret(request, reply)) return;
     try {
-      const { userId, notification, cookies } = request.body;
-      const result = await handleInternalDispatch(userId, notification, cookies);
+      const { userId, notification, cookies, courseId = '' } = request.body;
+      const result = await handleInternalDispatch(userId, notification, cookies, courseId);
       return { status: 'success', processed: result.processed, reason: result.reason };
     } catch (error) {
       request.log.error(error);

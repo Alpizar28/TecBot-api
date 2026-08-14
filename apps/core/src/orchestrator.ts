@@ -25,6 +25,7 @@ import {
 } from '@tec-brain/drive';
 import { dispatch, recentDispatchErrors, type DispatchResult } from './dispatcher.js';
 import {
+  forwardDriveFile,
   forwardStudyosAlerts,
   retryStudyosPending,
   syncEvaluations,
@@ -56,6 +57,9 @@ const ADMIN_ALERT_CHAT_ID = process.env.ADMIN_ALERT_CHAT_ID ?? '';
 // otherwise alerts fire only on state transitions (started failing / recovered).
 const ADMIN_ALERT_REMIND_MS =
   parseInt(process.env.ADMIN_ALERT_COOLDOWN_MINUTES ?? '360', 10) * 60_000;
+const TALLER_DIGITAL_COURSE_ID = 'ce3201';
+const TALLER_DIGITAL_DRIVE_FOLDER_ID = process.env.TALLER_DIGITAL_DRIVE_FOLDER_ID ?? '';
+const MAX_STUDYOS_FILE_BYTES = 50 * 1024 * 1024;
 
 // Singleton Telegram service
 const telegram = new TelegramService(process.env.TELEGRAM_BOT_TOKEN ?? '');
@@ -100,7 +104,7 @@ const dispatchCounters = new Map<
  * Main orchestration cycle.
  * Fetches active users, calls the scraper, and dispatches each notification.
  */
-export async function runOrchestrationCycle(): Promise<void> {
+export async function runOrchestrationCycle(keywords: string[] = [], courseId = ''): Promise<void> {
   if (running) {
     logger.info({ component: 'orchestrator' }, 'Cycle already in progress, skipping');
     return;
@@ -135,11 +139,12 @@ export async function runOrchestrationCycle(): Promise<void> {
     const tasks = users.map((user) =>
       limit(async () => {
         try {
-          const stats = await processUser(user);
+          const stats = await processUser(user, keywords, courseId);
           cycleStats.usersProcessed += 1;
           cycleStats.notificationsDispatched += stats.dispatched;
           cycleStats.notificationsProcessed += stats.processed;
           cycleStats.notificationsPartial += stats.partial;
+          if (!courseId || courseId === TALLER_DIGITAL_COURSE_ID) await syncTallerDigitalDrive(user);
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
           const isAuthError = errorMsg.includes('Session invalid after re-authentication');
@@ -231,6 +236,24 @@ export async function runOrchestrationCycle(): Promise<void> {
   }
 }
 
+async function syncTallerDigitalDrive(user: Awaited<ReturnType<typeof getActiveUsers>>[0]): Promise<void> {
+  if (!TALLER_DIGITAL_DRIVE_FOLDER_ID || !oauthClient) return;
+  const encryptedToken = await getDriveOAuthToken(user.id);
+  if (!encryptedToken) return;
+  const drive = DriveService.fromOAuthToken(oauthClient, decrypt(encryptedToken));
+  const files = await drive.listFilesRecursively(TALLER_DIGITAL_DRIVE_FOLDER_ID);
+  for (const source of files) {
+    try {
+      const downloaded = await drive.downloadSourceFile(source);
+      if (!downloaded || downloaded.content.length > MAX_STUDYOS_FILE_BYTES) continue;
+      if (!downloaded.mimeType.startsWith('application/pdf') && !downloaded.mimeType.startsWith('image/')) continue;
+      await forwardDriveFile(user, TALLER_DIGITAL_COURSE_ID, source, downloaded);
+    } catch (error) {
+      logger.warn({ component: 'drive_course_sync', fileId: source.id, error: String(error) }, 'Failed to import Drive file');
+    }
+  }
+}
+
 export async function handleInternalDispatch(
   userId: string,
   notification: import('@tec-brain/types').RawNotification,
@@ -316,6 +339,8 @@ export async function handleInternalDispatch(
 
 async function processUser(
   user: Awaited<ReturnType<typeof getActiveUsers>>[0],
+  keywords: string[] = [],
+  courseId = '',
 ): Promise<{ dispatched: number; processed: number; partial: number }> {
   logger.info(
     {
@@ -375,6 +400,8 @@ async function processUser(
       password,
       user.id,
       (notification) => handleInternalDispatch(user.id, notification, []),
+      keywords,
+      courseId,
     );
 
     if (result === 'error') {

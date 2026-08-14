@@ -216,6 +216,15 @@ Mensajes minimalistas:
 
 Mientras la subida a Drive siga fallando, los documentos usan fallback por Telegram y no se debe asumir que habrá link directo al archivo en Drive.
 
+## Carpeta compartida de Taller Digital
+
+`TALLER_DIGITAL_DRIVE_FOLDER_ID` configura una fuente de lectura exclusiva para
+CE3201. En cada ciclo, TecBot recorre esa carpeta y todas sus subcarpetas,
+importa PDFs e imágenes, y exporta Google Docs, Sheets, Slides y Drawings a
+PDF antes de enviarlos a StudyOS. La cuenta autorizada mediante OAuth debe tener
+acceso a la carpeta compartida. Archivos que no puedan convertirse a PDF (por
+ejemplo Forms) se omiten y se registran en el log.
+
 ## Deduplicación (importante)
 
 El sistema evita duplicados en dos niveles:
