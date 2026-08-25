@@ -49,6 +49,7 @@ export interface StudyosEvaluationMeta {
   grade_over_100: number | null;
   due_date: string;
   due_time: string;
+  submitted: boolean;
   late_allowed: boolean;
 }
 
@@ -353,6 +354,7 @@ interface ScrapedEvaluationCourse {
     description: string;
     due_date: string;
     due_time: string;
+    submitted: boolean;
     late_allowed: boolean;
     comments: string;
     files: Array<{ file_name: string; download_url: string; mime_type: string }>;
@@ -457,6 +459,7 @@ export function buildEvaluationItemPayload(
       grade_over_100: ev.grade_over_100,
       due_date: ev.due_date,
       due_time: ev.due_time,
+      submitted: ev.submitted,
       late_allowed: ev.late_allowed,
     },
   };

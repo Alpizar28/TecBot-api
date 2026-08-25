@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { User } from '@tec-brain/types';
+import { parseEvaluationsPage } from '../src/scraper/evaluations.js';
 
 const db = {
   decrypt: vi.fn((v: string) => v.replace('enc:', '')),
@@ -50,6 +51,7 @@ const course = {
       description: 'Ver capítulo 4',
       due_date: '2026-03-20',
       due_time: '08:00',
+      submitted: false,
       late_allowed: true,
       comments: 'Puntos extra',
       files: [
@@ -97,8 +99,40 @@ describe('buildEvaluationItemPayload()', () => {
     expect(payload.link).toBe(`${course.url}evaluation/tda-ce-estudiante/tda-index`);
     expect(payload.evaluation?.due_date).toBe('2026-03-20');
     expect(payload.evaluation?.grade_over_100).toBe(100.0);
+    expect(payload.evaluation?.submitted).toBe(false);
     expect(payload.body).toContain('Fecha de entrega: 2026-03-20 08:00');
     expect(payload.body).toContain('Nota: 100/100');
+  });
+});
+
+describe('parseEvaluationsPage()', () => {
+  const courseUrl = 'https://tecdigital.tec.ac.cr/dotlrn/classes/MA/MA2104/S-1-2026.CA.MA2104.1/';
+
+  it('detects a submission from TEC Digital delivery timestamps', () => {
+    const evaluations = parseEvaluationsPage(`
+      <div class="title_acor_grade"><span class="clase">Tareas</span></div>
+      <div class="ccontent_assign">
+        <span class="assignNameText">Tarea 1</span>
+        <p class="title_subsection">Fecha de Entrega</p><span class="body_style">20/03/2026 08:00</span>
+        <p>Día de entrega: 19/03/2026</p>
+      </div>
+    `, courseUrl);
+
+    expect(evaluations).toHaveLength(1);
+    expect(evaluations[0].submitted).toBe(true);
+  });
+
+  it('keeps an assignment pending without delivery timestamps', () => {
+    const evaluations = parseEvaluationsPage(`
+      <div class="title_acor_grade"><span class="clase">Tareas</span></div>
+      <div class="ccontent_assign">
+        <span class="assignNameText">Tarea 1</span>
+        <p class="title_subsection">Fecha de Entrega</p><span class="body_style">20/03/2026 08:00</span>
+      </div>
+    `, courseUrl);
+
+    expect(evaluations).toHaveLength(1);
+    expect(evaluations[0].submitted).toBe(false);
   });
 });
 

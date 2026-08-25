@@ -34,6 +34,7 @@ export interface CourseEvaluation {
   description: string;
   due_date: string;
   due_time: string;
+  submitted: boolean;
   late_allowed: boolean;
   comments: string;
   files: EvaluationFile[];
@@ -187,6 +188,10 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
       return value ? $(value).text().trim() : '';
     })();
     const { date: dueDate, time: dueTime } = parseDueDate(dueText);
+    const assignmentText = node.text().replace(/\s+/g, ' ').trim();
+    // TEC Digital displays either timestamp only after the student submits.
+    const submitted = /D[ií]a de entrega\s*:/i.test(assignmentText)
+      || /Hora de entrega\s*:/i.test(assignmentText);
 
     const lateAllowed = radioIsYes(
       $,
@@ -240,6 +245,7 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
       description,
       due_date: dueDate,
       due_time: dueTime,
+      submitted,
       late_allowed: lateAllowed,
       comments,
       files,
