@@ -21,6 +21,17 @@ interface TecNotificationItem {
 const extractorLogger = logger.child({ component: 'notifications_extractor' });
 const HTTP_RETRY_ATTEMPTS = parseInt(process.env.HTTP_RETRY_ATTEMPTS ?? '3', 10);
 const HTTP_RETRY_BASE_MS = parseInt(process.env.HTTP_RETRY_BASE_MS ?? '400', 10);
+const EXCLUDED_STUDYOS_COURSE_CODE = 'CE2201';
+const TEC_COURSE_URL_RE = /\/dotlrn\/classes\/[^/?#]+\/([A-Z]{2,4}\d{3,4})(?:[/?#]|$)/i;
+
+/**
+ * Avoids resolving notification pages and document files for the circuit-lab
+ * groups that are not relevant to this StudyOS deployment.
+ */
+export function shouldProcessNotificationCourse(url: string | undefined): boolean {
+  const code = (url ?? '').match(TEC_COURSE_URL_RE)?.[1]?.toUpperCase();
+  return code !== EXCLUDED_STUDYOS_COURSE_CODE;
+}
 
 interface EndpointMetric {
   calls: number;
@@ -35,7 +46,9 @@ type MetricStore = Record<string, EndpointMetric>;
 export async function processNotificationsSequentially(
   client: TecHttpClient,
   userId: string,
-  onNotification: (notification: RawNotification) => Promise<{ processed: boolean; reason: string }>,
+  onNotification: (
+    notification: RawNotification,
+  ) => Promise<{ processed: boolean; reason: string }>,
   keywords: string[] = [],
   courseId = '',
 ): Promise<'ok' | 'invalid_session'> {
@@ -87,6 +100,13 @@ export async function processNotificationsSequentially(
 
     for (const [index, item] of items.entries()) {
       try {
+        if (!shouldProcessNotificationCourse(item.url)) {
+          extractorLogger.debug(
+            { userId, index, url: item.url },
+            'Notification skipped for excluded course',
+          );
+          continue;
+        }
         const parsed = await normalizeNotification(client, item);
 
         if (!parsed.link) {
@@ -104,7 +124,12 @@ export async function processNotificationsSequentially(
           );
           continue;
         }
-        if (courseId && !parsed.course.toLowerCase().includes(courseId.toLowerCase()) && !parsed.link.toLowerCase().includes(courseId.toLowerCase())) continue;
+        if (
+          courseId &&
+          !parsed.course.toLowerCase().includes(courseId.toLowerCase()) &&
+          !parsed.link.toLowerCase().includes(courseId.toLowerCase())
+        )
+          continue;
 
         const dispatchResult = await onNotification(parsed);
 
@@ -291,30 +316,34 @@ async function resolveNewsContent(
 }
 
 function htmlToPlainText(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n')
-    .replace(/<\/li>/gi, '\n')
-    .replace(/<strong[^>]*>([\s\S]*?)<\/strong>/gi, '*$1*')
-    .replace(/<b[^>]*>([\s\S]*?)<\/b>/gi, '*$1*')
-    // Los enlaces se conservan como "texto (URL)": al aplanar el HTML sin
-    // esto, un "Reunión- Unirse | Microsoft Teams" pierde el href y el enlace
-    // de la clase queda irrecuperable aguas abajo.
-    .replace(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, text) => {
-      const label = String(text).replace(/<[^>]+>/g, '').trim();
-      const url = String(href).trim();
-      if (!url || url.startsWith('#') || url.startsWith('javascript:')) return label;
-      return label && label !== url ? `${label} (${url})` : url;
-    })
-    .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  return (
+    html
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>/gi, '\n')
+      .replace(/<\/li>/gi, '\n')
+      .replace(/<strong[^>]*>([\s\S]*?)<\/strong>/gi, '*$1*')
+      .replace(/<b[^>]*>([\s\S]*?)<\/b>/gi, '*$1*')
+      // Los enlaces se conservan como "texto (URL)": al aplanar el HTML sin
+      // esto, un "Reunión- Unirse | Microsoft Teams" pierde el href y el enlace
+      // de la clase queda irrecuperable aguas abajo.
+      .replace(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, text) => {
+        const label = String(text)
+          .replace(/<[^>]+>/g, '')
+          .trim();
+        const url = String(href).trim();
+        if (!url || url.startsWith('#') || url.startsWith('javascript:')) return label;
+        return label && label !== url ? `${label} (${url})` : url;
+      })
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+  );
 }
 
 async function resolveDocumentFiles(
