@@ -176,6 +176,26 @@ describe('forwardNotification()', () => {
     );
   });
 
+  it('does not post excluded circuit-lab notifications to StudyOS', async () => {
+    db.getNotificationId.mockResolvedValue('row-ce2201');
+    db.resolveCourseEntry.mockResolvedValue({
+      key: 'code:CE2201',
+      legacyKey: 'ce2201',
+      code: 'CE2201',
+      name: 'Laboratorio de Circuitos Eléctricos',
+      label: 'CE2201 - Laboratorio de Circuitos Eléctricos',
+      isUnknown: false,
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { forwardNotification } = await import('../src/studyos.js');
+    await forwardNotification(baseUser, { ...notification, course: 'CE2201' });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(db.markStudyosDelivered).toHaveBeenCalledWith('row-ce2201');
+  });
+
   it('is a no-op when the user has no StudyOS target', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);

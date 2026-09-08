@@ -28,16 +28,13 @@ import {
   forwardDriveFile,
   forwardStudyosAlerts,
   retryStudyosPending,
+  shouldSyncCourseToStudyos,
   syncEvaluations,
   type FileDownloader,
 } from './studyos.js';
 import pLimit from 'p-limit';
 import type { ScrapeResponse } from '@tec-brain/types';
-import {
-  processUserNotifications,
-  getUserEvaluations,
-  downloadTecFile,
-} from './scraper/index.js';
+import { processUserNotifications, getUserEvaluations, downloadTecFile } from './scraper/index.js';
 import { logger } from './logger.js';
 const ALERT_PARTIAL_THRESHOLD_PCT = parseInt(process.env.ALERT_PARTIAL_THRESHOLD_PCT ?? '20', 10);
 const ALERT_USER_FAILURES_THRESHOLD = parseInt(
@@ -144,13 +141,12 @@ export async function runOrchestrationCycle(keywords: string[] = [], courseId = 
           cycleStats.notificationsDispatched += stats.dispatched;
           cycleStats.notificationsProcessed += stats.processed;
           cycleStats.notificationsPartial += stats.partial;
-          if (!courseId || courseId === TALLER_DIGITAL_COURSE_ID) await syncTallerDigitalDrive(user);
+          if (!courseId || courseId === TALLER_DIGITAL_COURSE_ID)
+            await syncTallerDigitalDrive(user);
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err);
           const isAuthError = errorMsg.includes('Session invalid after re-authentication');
-          const action = isAuthError
-            ? 'tec_auth_failed'
-            : 'orchestration_failed';
+          const action = isAuthError ? 'tec_auth_failed' : 'orchestration_failed';
 
           void insertErrorLog({
             user_id: user.id,
@@ -236,7 +232,9 @@ export async function runOrchestrationCycle(keywords: string[] = [], courseId = 
   }
 }
 
-async function syncTallerDigitalDrive(user: Awaited<ReturnType<typeof getActiveUsers>>[0]): Promise<void> {
+async function syncTallerDigitalDrive(
+  user: Awaited<ReturnType<typeof getActiveUsers>>[0],
+): Promise<void> {
   if (!TALLER_DIGITAL_DRIVE_FOLDER_ID || !oauthClient) return;
   const encryptedToken = await getDriveOAuthToken(user.id);
   if (!encryptedToken) return;
@@ -246,10 +244,17 @@ async function syncTallerDigitalDrive(user: Awaited<ReturnType<typeof getActiveU
     try {
       const downloaded = await drive.downloadSourceFile(source);
       if (!downloaded || downloaded.content.length > MAX_STUDYOS_FILE_BYTES) continue;
-      if (!downloaded.mimeType.startsWith('application/pdf') && !downloaded.mimeType.startsWith('image/')) continue;
+      if (
+        !downloaded.mimeType.startsWith('application/pdf') &&
+        !downloaded.mimeType.startsWith('image/')
+      )
+        continue;
       await forwardDriveFile(user, TALLER_DIGITAL_COURSE_ID, source, downloaded);
     } catch (error) {
-      logger.warn({ component: 'drive_course_sync', fileId: source.id, error: String(error) }, 'Failed to import Drive file');
+      logger.warn(
+        { component: 'drive_course_sync', fileId: source.id, error: String(error) },
+        'Failed to import Drive file',
+      );
     }
   }
 }
@@ -371,7 +376,7 @@ async function processUser(
   await syncEvaluations(
     user,
     async (username, tecPassword) => {
-      const courses = await getUserEvaluations(username, tecPassword);
+      const courses = await getUserEvaluations(username, tecPassword, shouldSyncCourseToStudyos);
       return courses as never[];
     },
     { username: user.tec_username, password },

@@ -21,7 +21,7 @@ import type { DriveSourceFile, DownloadedDriveFile } from '@tec-brain/drive';
 import { logger } from './logger.js';
 
 const REQUEST_TIMEOUT_MS = 30_000;
-const COURSE_URL_RE = /\/dotlrn\/classes\/[^\/?#]+\/([A-Z]{2,4}\d{3,4})\/([^\/?#]+)(?:[\/?#]|$)/i;
+const COURSE_URL_RE = /\/dotlrn\/classes\/[^/?#]+\/([A-Z]{2,4}\d{3,4})\/([^/?#]+)(?:[/?#]|$)/i;
 
 function courseFromTecUrl(...urls: Array<string | null | undefined>): {
   code: string;
@@ -32,6 +32,13 @@ function courseFromTecUrl(...urls: Array<string | null | undefined>): {
     if (match) return { code: match[1].toUpperCase(), communityKey: decodeURIComponent(match[2]) };
   }
   return { code: '', communityKey: '' };
+}
+
+const IGNORED_STUDYOS_COURSE_CODES = new Set(['CE2201']);
+
+/** Excludes the circuit-lab groups where this StudyOS user is an assistant. */
+export function shouldSyncCourseToStudyos(course: { code?: string }): boolean {
+  return !IGNORED_STUDYOS_COURSE_CODES.has((course.code ?? '').trim().toUpperCase());
 }
 
 export interface StudyosTarget {
@@ -238,7 +245,9 @@ export async function forwardDriveFile(
     link: source.webUrl,
     published_at: source.modifiedTime,
     detected_at: new Date().toISOString(),
-    files: [{ file_name: downloaded.name, download_url: source.webUrl, mime_type: downloaded.mimeType }],
+    files: [
+      { file_name: downloaded.name, download_url: source.webUrl, mime_type: downloaded.mimeType },
+    ],
   });
   await postFile(
     target,
@@ -283,7 +292,13 @@ export async function forwardNotification(
 
   try {
     const resolved = await resolveCourseEntry(notification.course);
-    await postItem(target, buildItemPayload(notification, resolved.key));
+    const payload = buildItemPayload(notification, resolved.key);
+    if (!shouldSyncCourseToStudyos(payload.course)) {
+      log.info({ courseCode: payload.course.code }, 'StudyOS course excluded from sync');
+      await markStudyosDelivered(notificationId);
+      return;
+    }
+    await postItem(target, payload);
 
     if (downloader && notification.files?.length) {
       for (const file of notification.files) {
@@ -661,7 +676,16 @@ export async function retryStudyosPending(user: User): Promise<void> {
   for (const n of pending) {
     try {
       const resolved = await resolveCourseEntry(n.course);
-      await postItem(target, buildItemPayload(n, resolved.key));
+      const payload = buildItemPayload(n, resolved.key);
+      if (!shouldSyncCourseToStudyos(payload.course)) {
+        log.info(
+          { externalId: n.external_id, courseCode: payload.course.code },
+          'StudyOS course excluded from retry',
+        );
+        await markStudyosDelivered(n.id);
+        continue;
+      }
+      await postItem(target, payload);
       await markStudyosDelivered(n.id);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

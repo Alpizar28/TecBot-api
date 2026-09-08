@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { User } from '@tec-brain/types';
-import { parseEvaluationsPage } from '../src/scraper/evaluations.js';
+import { parseEvaluationsPage, scrapeEvaluations } from '../src/scraper/evaluations.js';
 
 const db = {
   decrypt: vi.fn((v: string) => v.replace('enc:', '')),
@@ -87,7 +87,11 @@ function stubFetch(): ReturnType<typeof vi.fn> {
 describe('buildEvaluationItemPayload()', () => {
   it('maps rubric data to the sync contract with the evaluation block', async () => {
     const { buildEvaluationItemPayload } = await studyos();
-    const payload = buildEvaluationItemPayload(course, course.evaluations[0], '2026-07-15T00:00:00Z');
+    const payload = buildEvaluationItemPayload(
+      course,
+      course.evaluations[0],
+      '2026-07-15T00:00:00Z',
+    );
     expect(payload.type).toBe('evaluacion');
     expect(payload.external_id).toBe('eval_abc123');
     expect(payload.course).toEqual({
@@ -105,34 +109,64 @@ describe('buildEvaluationItemPayload()', () => {
   });
 });
 
+describe('StudyOS course exclusion', () => {
+  it('excludes the CE2201 circuit-lab groups only', async () => {
+    const { shouldSyncCourseToStudyos } = await studyos();
+
+    expect(shouldSyncCourseToStudyos({ code: 'CE2201' })).toBe(false);
+    expect(shouldSyncCourseToStudyos({ code: 'CE1109' })).toBe(true);
+  });
+});
+
 describe('parseEvaluationsPage()', () => {
   const courseUrl = 'https://tecdigital.tec.ac.cr/dotlrn/classes/MA/MA2104/S-1-2026.CA.MA2104.1/';
 
   it('detects a submission from TEC Digital delivery timestamps', () => {
-    const evaluations = parseEvaluationsPage(`
+    const evaluations = parseEvaluationsPage(
+      `
       <div class="title_acor_grade"><span class="clase">Tareas</span></div>
       <div class="ccontent_assign">
         <span class="assignNameText">Tarea 1</span>
         <p class="title_subsection">Fecha de Entrega</p><span class="body_style">20/03/2026 08:00</span>
         <p>Día de entrega: 19/03/2026</p>
       </div>
-    `, courseUrl);
+    `,
+      courseUrl,
+    );
 
     expect(evaluations).toHaveLength(1);
     expect(evaluations[0].submitted).toBe(true);
   });
 
   it('keeps an assignment pending without delivery timestamps', () => {
-    const evaluations = parseEvaluationsPage(`
+    const evaluations = parseEvaluationsPage(
+      `
       <div class="title_acor_grade"><span class="clase">Tareas</span></div>
       <div class="ccontent_assign">
         <span class="assignNameText">Tarea 1</span>
         <p class="title_subsection">Fecha de Entrega</p><span class="body_style">20/03/2026 08:00</span>
       </div>
-    `, courseUrl);
+    `,
+      courseUrl,
+    );
 
     expect(evaluations).toHaveLength(1);
     expect(evaluations[0].submitted).toBe(false);
+  });
+
+  it('skips excluded course groups before requesting their evaluations', async () => {
+    const portal = `
+      <a href="/dotlrn/classes/CE/CE2201/S-2-2026.CA.CE2201.1/">Laboratorio de Circuitos Eléctricos GR 1</a>
+      <a href="/dotlrn/classes/CE/CE1109/S-2-2026.CA.CE1109.1/">Circuitos Analógicos GR 1</a>
+    `;
+    const get = vi.fn(async (url: string) => ({ data: url.endsWith('/dotlrn/') ? portal : '' }));
+    const client = { client: { get } };
+
+    const courses = await scrapeEvaluations(client as never, (course) => course.code !== 'CE2201');
+
+    expect(courses.map((course) => course.code)).toEqual(['CE1109']);
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(get.mock.calls[1][0]).toContain('/CE1109/');
   });
 });
 
@@ -205,11 +239,7 @@ describe('syncEvaluations()', () => {
     const scrape = vi.fn();
 
     const { syncEvaluations } = await studyos();
-    await syncEvaluations(
-      { ...user, studyos_url: null },
-      scrape,
-      { username: 'u', password: 'p' },
-    );
+    await syncEvaluations({ ...user, studyos_url: null }, scrape, { username: 'u', password: 'p' });
 
     expect(scrape).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
@@ -219,10 +249,26 @@ describe('syncEvaluations()', () => {
 describe('forwardStudyosAlerts()', () => {
   const alertsPayload = {
     alerts: [
-      { id: 1, kind: 'due_48h', payload: { external_id: 'eval_1', title: 'Q4',
-        course_id: 'ma2104', due_date: '2026-08-02' } },
-      { id: 2, kind: 'graded', payload: { external_id: 'eval_2', title: 'Parcial 2',
-        course_id: 'el2114', grade: '27.3/33.0 pts' } },
+      {
+        id: 1,
+        kind: 'due_48h',
+        payload: {
+          external_id: 'eval_1',
+          title: 'Q4',
+          course_id: 'ma2104',
+          due_date: '2026-08-02',
+        },
+      },
+      {
+        id: 2,
+        kind: 'graded',
+        payload: {
+          external_id: 'eval_2',
+          title: 'Parcial 2',
+          course_id: 'el2114',
+          grade: '27.3/33.0 pts',
+        },
+      },
     ],
   };
 
@@ -237,7 +283,9 @@ describe('forwardStudyosAlerts()', () => {
 
     const sent: string[] = [];
     const { forwardStudyosAlerts } = await studyos();
-    await forwardStudyosAlerts(user, async (html) => { sent.push(html); });
+    await forwardStudyosAlerts(user, async (html) => {
+      sent.push(html);
+    });
 
     expect(sent).toHaveLength(2);
     expect(sent[0]).toContain('Entrega en menos de 48 h');

@@ -173,9 +173,7 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
     const weightedText = gradeEl.find('.gradeW').first().text().trim();
     const weightedScore = weightedText ? parseFloat(weightedText.replace(',', '.')) : null;
     const { score, max } =
-      weightedScore === null
-        ? parseScorePair(gradeEl.text())
-        : { score: null, max: null };
+      weightedScore === null ? parseScorePair(gradeEl.text()) : { score: null, max: null };
 
     const description = (() => {
       const value = detailValue($, node, /^Descripción/);
@@ -190,13 +188,10 @@ export function parseEvaluationsPage(html: string, courseUrl: string): CourseEva
     const { date: dueDate, time: dueTime } = parseDueDate(dueText);
     const assignmentText = node.text().replace(/\s+/g, ' ').trim();
     // TEC Digital displays either timestamp only after the student submits.
-    const submitted = /D[ií]a de entrega\s*:/i.test(assignmentText)
-      || /Hora de entrega\s*:/i.test(assignmentText);
+    const submitted =
+      /D[ií]a de entrega\s*:/i.test(assignmentText) || /Hora de entrega\s*:/i.test(assignmentText);
 
-    const lateAllowed = radioIsYes(
-      $,
-      detailValue($, node, /después de fecha límite/),
-    );
+    const lateAllowed = radioIsYes($, detailValue($, node, /después de fecha límite/));
 
     let gradeOver100: number | null = null;
     let comments = '';
@@ -265,10 +260,19 @@ export function resolveEvaluationUrl(href: string, courseUrl: string): string {
   return `${base}${trimmed.slice(viewIdx)}`;
 }
 
-export async function scrapeEvaluations(client: TecHttpClient): Promise<CourseEvaluations[]> {
+export type CourseSelection = (course: CourseRef) => boolean;
+
+export async function scrapeEvaluations(
+  client: TecHttpClient,
+  shouldScrapeCourse: CourseSelection = () => true,
+): Promise<CourseEvaluations[]> {
   const portal = await client.client.get<string>(`${TEC_BASE}/dotlrn/`, { timeout: 30_000 });
-  const courses = parseCourseLinks(String(portal.data ?? ''));
-  extractorLogger.info({ count: courses.length }, 'Current-term courses discovered');
+  const discovered = parseCourseLinks(String(portal.data ?? ''));
+  const courses = discovered.filter(shouldScrapeCourse);
+  extractorLogger.info(
+    { discovered: discovered.length, selected: courses.length },
+    'Current-term courses selected for evaluations',
+  );
 
   const out: CourseEvaluations[] = [];
   for (const course of courses) {
