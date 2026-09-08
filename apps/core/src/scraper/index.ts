@@ -21,6 +21,7 @@ export type {
   EvaluationFile,
   CourseEvaluation,
   CourseEvaluations,
+  CourseSelection,
 } from './evaluations.js';
 
 export {
@@ -42,7 +43,9 @@ export async function processUserNotifications(
   username: string,
   password: string,
   userId: string,
-  onNotification: (notification: RawNotification) => Promise<{ processed: boolean; reason: string }>,
+  onNotification: (
+    notification: RawNotification,
+  ) => Promise<{ processed: boolean; reason: string }>,
   keywords: string[] = [],
   courseId = '',
 ): Promise<'ok' | 'error'> {
@@ -77,11 +80,12 @@ export async function processUserNotifications(
 export async function getUserEvaluations(
   username: string,
   password: string,
+  shouldScrapeCourse?: import('./evaluations.js').CourseSelection,
 ): Promise<import('./evaluations.js').CourseEvaluations[]> {
   const client = await safeGetClient(username, password);
   if (!client) return [];
 
-  let courses = await scrapeEvals(client);
+  let courses = await scrapeEvals(client, shouldScrapeCourse);
 
   if (courses.length === 0) {
     logger.warn({ username }, 'No courses found, re-authenticating');
@@ -92,7 +96,7 @@ export async function getUserEvaluations(
       logger.error({ username }, 'Re-authentication failed for evaluations');
       return courses;
     }
-    courses = await scrapeEvals(client);
+    courses = await scrapeEvals(client, shouldScrapeCourse);
   }
 
   return courses;
@@ -122,10 +126,7 @@ export async function downloadTecFile(
 
 // ─── Internal helpers ───────────────────────────────────────────────────────
 
-async function safeGetClient(
-  username: string,
-  password: string,
-): Promise<TecHttpClient | null> {
+async function safeGetClient(username: string, password: string): Promise<TecHttpClient | null> {
   try {
     return await sessionManager.getClient(username, password);
   } catch (error) {
