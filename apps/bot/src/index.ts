@@ -734,33 +734,7 @@ async function main() {
   bot.command('almacenamiento', async (ctx) => {
     const chatId = String(ctx.chat.id);
     if (isRateLimited(chatId)) return;
-    const user = await getUserByTelegramChatId(chatId);
-
-    if (!user) {
-      await ctx.reply('❌ No tienes una cuenta registrada. Envía /start para comenzar.');
-      return;
-    }
-
-    const pending = await getPendingRegistration(chatId);
-    if (pending && pending.step !== 'done') {
-      await ctx.reply(
-        '⚠️ Tienes un registro en progreso. Completa ese flujo o envía /cancelar antes de cambiar almacenamiento.',
-      );
-      return;
-    }
-
-    const providerLabel =
-      user.storage_provider === 'drive'
-        ? 'Google Drive'
-        : user.storage_provider === 'onedrive'
-          ? 'OneDrive'
-          : 'Sin almacenamiento';
-
-    await ctx.reply(
-      `📦 <b>Almacenamiento actual:</b> ${providerLabel}\n\n` +
-        'Elige dónde quieres guardar los documentos:',
-      { parse_mode: 'HTML', reply_markup: storageMenu },
-    );
+    await ctx.reply('ℹ️ El almacenamiento externo fue desactivado. Los documentos llegan con enlaces directos por Telegram.');
   });
 
   // ─── /studyos ───────────────────────────────────────────────────────────────
@@ -960,22 +934,18 @@ async function main() {
         return;
       }
 
-      await advancePendingRegistration(chatId, 'awaiting_drive_folder', {
+      await advancePendingRegistration(chatId, 'awaiting_confirmation', {
         tec_password_enc: encryptedPwd,
       });
 
       await ctx.reply(
-        `✅ Contraseña guardada de forma segura.\n\n` +
+        `📋 <b>Resumen de tu registro</b>\n\n` +
+          `📧 <b>Correo TEC:</b> <code>${pending.tec_username ?? '?'}</code>\n` +
+          `🔑 <b>Contraseña:</b> <code>••••••••</code> (cifrada)\n` +
+          `📁 <b>Documentos:</b> enlaces directos por Telegram\n\n` +
           `─────────────────────\n` +
-          `📁 <b>Paso 3 de 3</b>\n` +
-          `¿Quieres que el bot suba tus archivos y documentos a <b>Google Drive</b>?\n\n` +
-          `Si <b>sí</b>:\n` +
-          `1. Abre Google Drive y crea una carpeta (ej: <i>"Universidad"</i>).\n` +
-          `2. Entra a esa carpeta y copia el <b>ID</b> que aparece en la URL:\n` +
-          `   <code>drive.google.com/drive/folders/<b>ESTE_ES_EL_ID</b></code>\n` +
-          `3. Pégalo aquí en el chat.\n\n` +
-          `Si <b>no</b> quieres usar Drive, presiona el botón de abajo:`,
-        { parse_mode: 'HTML', reply_markup: skipDriveMenu },
+          `¿Todo está bien?`,
+        { parse_mode: 'HTML', reply_markup: confirmMenu },
       );
       return;
     }
