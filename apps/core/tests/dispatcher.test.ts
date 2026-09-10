@@ -202,6 +202,52 @@ describe('dispatch()', () => {
     );
   });
 
+  it('sends only document files not previously delivered when storage is disabled', async () => {
+    const docNotification: RawNotification = {
+      ...notification,
+      external_id: 'notif_2',
+      type: 'documento',
+      files: [
+        {
+          file_name: 'archivo-anterior.pdf',
+          download_url: 'https://tecdigital.tec.ac.cr/anterior.pdf',
+        },
+        {
+          file_name: 'archivo-nuevo.pdf',
+          download_url: 'https://tecdigital.tec.ac.cr/nuevo.pdf',
+        },
+      ],
+    } as RawNotification;
+
+    db.getNotificationState.mockResolvedValue({ exists: false, document_status: null });
+    db.uploadedFileExists.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    db.insertUploadedFile.mockResolvedValue(undefined);
+
+    const telegram = {
+      sendNotice: vi.fn(),
+      sendEvaluation: vi.fn(),
+      sendDocumentsSaved: vi.fn(),
+      sendDocumentsDownload: vi.fn().mockResolvedValue(undefined),
+      sendDocumentLink: vi.fn(),
+      sendDriveAuthExpired: vi.fn(),
+    } as any;
+
+    const { dispatch } = await import('../src/dispatcher.js');
+    await dispatch(user, docNotification, '', telegram, null);
+
+    expect(telegram.sendDocumentsDownload).toHaveBeenCalledWith(user, docNotification, [
+      docNotification.files![1],
+    ]);
+    expect(db.insertUploadedFile).toHaveBeenCalledTimes(1);
+    expect(db.insertUploadedFile).toHaveBeenCalledWith(
+      user.id,
+      docNotification.course,
+      expect.any(String),
+      'archivo-nuevo.pdf',
+      'fallback',
+    );
+  });
+
   it('marks document fallback when drive disabled', async () => {
     const docNotification: RawNotification = {
       ...notification,

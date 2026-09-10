@@ -339,15 +339,29 @@ async function sendLinksFallback(
   notification: RawNotification,
   telegram: TelegramService,
 ): Promise<boolean> {
+  const newFiles: NonNullable<RawNotification['files']> = [];
+
+  for (const file of notification.files!) {
+    const fileHash = crypto
+      .createHash('sha256')
+      .update(file.download_url + file.file_name)
+      .digest('hex');
+    if (!(await uploadedFileExists(user.id, fileHash))) {
+      newFiles.push(file);
+    }
+  }
+
+  if (newFiles.length === 0) return true;
+
   const sent = await safeTelegram(
     user,
     notification,
-    () => telegram.sendDocumentsDownload(user, notification, notification.files!),
+    () => telegram.sendDocumentsDownload(user, notification, newFiles),
     'telegram_doc_download',
   );
 
   if (sent) {
-    for (const file of notification.files!) {
+    for (const file of newFiles) {
       const fileHash = crypto
         .createHash('sha256')
         .update(file.download_url + file.file_name)
