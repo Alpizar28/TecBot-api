@@ -431,6 +431,34 @@ async function main() {
       );
     })
     .row()
+    .text('🔗 Reconectar Drive', async (ctx) => {
+      const chatId = String(ctx.chat?.id);
+      const user = await getUserByTelegramChatId(chatId);
+
+      if (user?.storage_provider !== 'drive' || !user.drive_root_folder_id) {
+        await ctx.editMessageText(
+          '⚠️ No tienes una carpeta de Google Drive configurada. Usa /almacenamiento para configurarla.',
+        );
+        return;
+      }
+
+      try {
+        const driveUrl = await buildDriveAuthUrl(user.id);
+        await ctx.editMessageText(
+          `🔗 <b>Reconectar Google Drive</b>\n\n` +
+            `Tu autorización de Drive venció. Abre este enlace y acepta los permisos para reactivarla:\n\n` +
+            `👉 <a href="${driveUrl.replace(/&/g, '&amp;')}">Autorizar Google Drive</a>\n\n` +
+            `<i>El enlace vence en 10 minutos.</i>`,
+          { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
+        );
+      } catch (err) {
+        logger.warn({ err, userId: user.id }, 'Could not build Drive reconnection URL');
+        await ctx.editMessageText(
+          '⚠️ No pude generar el enlace de autorización de Drive. Inténtalo de nuevo más tarde.',
+        );
+      }
+    })
+    .row()
     .text('🔄 Actualizar Todo', async (ctx) => {
       const chatId = String(ctx.chat?.id);
       await upsertPendingRegistrationWithStep(chatId, 'awaiting_username');
